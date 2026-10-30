@@ -2,14 +2,16 @@
   "expo": {
     "name": "opencode-mobile",
     "slug": "opencode-mobile",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "plugins": ["./plugins/withCleartext.js"],
     "ios": {
       "supportsTablet": true
     },
     "android": {
+      "package": "com.kiril.opencode",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
