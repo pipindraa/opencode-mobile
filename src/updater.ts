@@ -8,6 +8,7 @@
  * Настройка: репозиторий зашит в UPDATE_REPO — пользователю ничего вводить не нужно.
  */
 import { Paths } from "expo-file-system";
+import * as FileSystem from "expo-file-system/legacy";
 import { getContentUriAsync, downloadAsync, cacheDirectory } from "expo-file-system/legacy";
 import * as IntentLauncher from "expo-intent-launcher";
 
@@ -81,9 +82,20 @@ export async function downloadAndInstall(
   const dir = cacheDirectory ?? String(Paths.cache.uri);
   const target = `${dir}${rel.assetName || "update.apk"}`;
   onProgress?.(0);
-  const res = await downloadAsync(rel.apkUrl, target);
-  if (res.status < 200 || res.status >= 300) {
-    throw new Error(`Скачивание не удалось: HTTP ${res.status}`);
+  // createDownloadResumable умеет отдавать прогресс — иначе на 65 МБ экран «висит»
+  const task = FileSystem.createDownloadResumable(rel.apkUrl, target, {}, (e) => {
+    if (e.totalBytesExpectedToWrite > 0) {
+      onProgress?.(e.totalBytesWritten / e.totalBytesExpectedToWrite);
+    }
+  });
+  const res = await task.downloadAsync();
+  if (!res || res.status < 200 || res.status >= 300) {
+    throw new Error(`Скачивание не удалось: HTTP ${res?.status ?? "?"}`);
+  }
+  // legacy-загрузка молча отдаёт успех на недокачанном файле — проверяем размер
+  const info = await FileSystem.getInfoAsync(res.uri);
+  if (!info.exists || !info.size || info.size < 1024 * 1024) {
+    throw new Error("APK скачался не полностью — попробуй ещё раз");
   }
   onProgress?.(1);
   const uri = await getContentUriAsync(res.uri); // content:// — иначе установщик не откроет файл

@@ -109,8 +109,10 @@ export default function SetupScreen({ initialURL, initialPassword, onSave, onCan
             onPress: async () => {
               try {
                 setUpdateBusy(true);
-                setUpdateState("Скачиваю обновление…");
-                await downloadAndInstall(rel);
+                setUpdateState("Скачиваю 0%");
+                await downloadAndInstall(rel, (p) =>
+                  setUpdateState(p < 0 ? "Скачиваю…" : `Скачиваю ${Math.round(p * 100)}%`)
+                );
                 setUpdateState("Открыл установщик — подтверди установку");
               } catch (e: any) {
                 setError(e?.message ?? String(e));
