@@ -5,12 +5,14 @@
  * приложение спрашивает последний релиз, сравнивает версию со своей,
  * скачивает APK во временную папку и отдаёт системному установщику через FileProvider.
  *
- * Настройка: в настройках приложения (⚙) поле «Репозиторий обновлений» вида owner/repo.
- * Пустое поле — проверка обновлений выключена.
+ * Настройка: репозиторий зашит в UPDATE_REPO — пользователю ничего вводить не нужно.
  */
 import { Paths } from "expo-file-system";
 import { getContentUriAsync, downloadAsync, cacheDirectory } from "expo-file-system/legacy";
 import * as IntentLauncher from "expo-intent-launcher";
+
+/** репозиторий с релизами: откуда приложение тянет APK */
+export const UPDATE_REPO = "pipindraa/opencode-mobile";
 
 export interface ReleaseInfo {
   version: string;

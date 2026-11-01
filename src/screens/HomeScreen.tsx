@@ -15,7 +15,8 @@ import { OpenCodeApi, ServerKind } from "../api";
 import { AsyncStorage } from "../store";
 import { colors, spacing, fontSize } from "../theme";
 
-const LAPTOP_IP = "100.125.84.47";
+/** ID RustDesk на ноутбуке (меняется только при переустановке клиента) */
+const RUSTDESK_ID = "28440006";
 
 interface Props {
   api: OpenCodeApi;
@@ -58,7 +59,6 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings }: Prop
   const [projects, setProjects] = useState<{ directory: string; title: string }[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [activeCount, setActiveCount] = useState(0);
-  const [screenOpen, setScreenOpen] = useState(false);
   const [favs, setFavs] = useState<Set<string>>(new Set());
 
   // избранное чатов этого сервера — живёт только на телефоне
@@ -82,17 +82,9 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings }: Prop
   };
 
   const openRustDesk = () => {
-    setScreenOpen(false);
-    Linking.openURL(`rustdesk://connection/new/${LAPTOP_IP}`).catch(() => {
+    Linking.openURL(`rustdesk://connection/new/${RUSTDESK_ID}`).catch(() => {
       // RustDesk не установлен на телефоне — откроем страницу релиза APK
       Linking.openURL("https://github.com/rustdesk/rustdesk/releases");
-    });
-  };
-
-  const openWindowsApp = () => {
-    setScreenOpen(false);
-    Linking.openURL(`ms-rd:`).catch(() => {
-      Linking.openURL("https://play.google.com/store/apps/details?id=com.microsoft.rdc.androidx");
     });
   };
 
@@ -169,7 +161,7 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings }: Prop
               </Text>
             </View>
           )}
-          <Pressable style={s.iconBtn} onPress={() => setScreenOpen(true)}>
+          <Pressable style={s.iconBtn} onPress={openRustDesk}>
             <Text style={{ color: colors.text, fontSize: fontSize.l }}>🖥</Text>
           </Pressable>
           <Pressable style={s.iconBtn} onPress={openCreate}>
@@ -288,32 +280,6 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings }: Prop
               </>
             )}
             <Pressable style={[s.btn, s.btnRow]} onPress={() => setCreating(false)}>
-              <Text style={s.btnText}>Отмена</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
-      <Modal visible={screenOpen} transparent animationType="slide">
-        <View style={s.overlay}>
-          <View style={s.modal}>
-            <Text style={s.title}>Экран ноутбука</Text>
-            <Pressable style={s.card} onPress={openRustDesk}>
-              <Text style={s.cardTitle}>🖥 RustDesk — полный контроль</Text>
-              <Text style={s.cardDir}>
-                Мышь и клавиатура, офлайн-вход, буфер обмена. Пароль один раз:
-                Vah7-nu4k-Posem. Установи RustDesk с GitHub, если он ещё не стоит.
-              </Text>
-            </Pressable>
-            <Pressable style={s.card} onPress={openWindowsApp}>
-              <Text style={s.cardTitle}>🪟 Windows App (RDP)</Text>
-              <Text style={s.cardDir}>
-                Открывает клиент Microsoft Remote Desktop, если установлен.
-              </Text>
-            </Pressable>
-            <Text style={s.cardDir}>
-              Перед подключением включи Tailscale на телефоне.
-            </Text>
-            <Pressable style={[s.btn, s.btnRow]} onPress={() => setScreenOpen(false)}>
               <Text style={s.btnText}>Отмена</Text>
             </Pressable>
           </View>

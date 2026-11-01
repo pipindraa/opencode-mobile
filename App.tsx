@@ -21,10 +21,9 @@ export default function App() {
   const [omniApi, setOmniApi] = useState<OpenCodeApi | null>(null); // мост Omnirush
   const [currentSession, setCurrentSession] = useState<{ id: string; directory: string } | null>(null);
   const [chatTab, setChatTab] = useState<ServerKind>("opencode");
-  const [saved, setSaved] = useState<{ url: string; password: string; repo?: string }>({
+  const [saved, setSaved] = useState<{ url: string; password: string }>({
     url: "",
     password: "",
-    repo: "",
   });
 
   useEffect(() => {
@@ -36,9 +35,8 @@ export default function App() {
 
       const url = await AsyncStorage.get("url");
       const password = await AsyncStorage.get("password");
-      const repo = await AsyncStorage.get("updateRepo");
       if (url && password) {
-        setSaved({ url, password, repo });
+        setSaved({ url, password });
         setApi(new OpenCodeApi({ baseURL: url, password }));
         setScreen("home");
       } else {
@@ -49,11 +47,10 @@ export default function App() {
 
   if (screen === null) return null;
 
-  const saveAndUse = (url: string, password: string, repo = "") => {
+  const saveAndUse = (url: string, password: string) => {
     AsyncStorage.set("url", url);
     AsyncStorage.set("password", password);
-    AsyncStorage.set("updateRepo", repo);
-    setSaved({ url, password, repo });
+    setSaved({ url, password });
     setApi(new OpenCodeApi({ baseURL: url, password }));
     setScreen("home");
   };
@@ -74,7 +71,6 @@ export default function App() {
         <SetupScreen
           initialURL={saved.url || DEFAULT_URL}
           initialPassword={saved.password}
-          initialRepo={saved.repo}
           onSave={saveAndUse}
           onCancel={() => setScreen("home")}
         />

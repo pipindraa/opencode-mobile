@@ -7,7 +7,6 @@ import {
   StyleSheet,
   FlatList,
   ActivityIndicator,
-  Platform,
   Modal,
   BackHandler,
   Image,
@@ -322,13 +321,12 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     return () => clearInterval(t);
   }, [busy, sending]);
 
-  // клавиатура: на Android adjustResize сам уменьшает окно, поэтому панель ввода
-  // поднимается над клавиатурой без KeyboardAvoidingView (он давал двойной отступ).
-  // iOS требует ручного отступа.
+  // клавиатура: с Android 15 (targetSdk 36 + edge-to-edge) adjustResize игнорируется,
+  // поэтому высоту берём из события и поднимаем панель ввода сами.
   const [kbHeight, setKbHeight] = useState(0);
   useEffect(() => {
     const show = Keyboard.addListener("keyboardDidShow", (e: KeyboardEvent) =>
-      setKbHeight(Platform.OS === "ios" ? e.endCoordinates.height : 0)
+      setKbHeight(e.endCoordinates.height)
     );
     const hide = Keyboard.addListener("keyboardDidHide", () => setKbHeight(0));
     return () => {
