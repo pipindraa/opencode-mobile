@@ -378,7 +378,12 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     if (text) shown.push({ kind: "text", text });
     for (const a of attachments) shown.push({ kind: "file", label: a.filename, mime: a.mime, url: a.uri });
     setBubbles((prev) => [...prev, { key: `local-${Date.now()}`, role: "user", parts: shown }]);
-    const files = attachments.map((a) => ({ url: a.uri, mime: a.mime, filename: a.filename }));
+    const files: PromptFile[] = [];
+    for (const a of attachments) {
+      // сервер на ноуте не видит file:// телефона — сначала заливаем файл
+      const remote = await api.uploadFile(a.uri, a.filename, a.mime);
+      files.push({ url: `file:///${remote}`, mime: a.mime, filename: a.filename });
+    }
     setSending(true);
     try {
       // если агент чем-то занят — встанет в очередь (OpenCode delivery)

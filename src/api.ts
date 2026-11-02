@@ -5,6 +5,9 @@
  * client: @opencode/client/dist/chunks/shared-events-td2fzm91.js → Basic opencode:<password>
  */
 
+import * as FileSystem from "expo-file-system/legacy";
+import { EncodingType } from "expo-file-system/legacy";
+
 export type Decision = "once" | "always" | "reject";
 
 /** Какой сервер за API: OpenCode v2 или движок-форк Omnirush (мост на ноуте) */
@@ -161,6 +164,25 @@ export function parseMessage(raw: any): RenderMessage | null {
 // функция скрытия служебных простыней (выше)
 const MODEL_STATE_PATH = "C:/Users/kiril/.local/state/opencode/model.json";
 const PHONE_MARKER = "C:/Users/kiril/.local/state/opencode/phone-prompt.marker";
+/** куда складывать картинки с телефона, чтобы сервер мог их открыть */
+const UPLOAD_DIR = "C:/Users/kiril/.local/state/opencode/uploads";
+const OMNI_UPLOAD_DIR = "C:/Users/kiril/.local/state/opencode/uploads";
+
+/** base64 → байты: atob в Hermes есть, но bytes нужны для бинарного тела */
+function base64ToBytes(b64: string): number[] {
+  const clean = b64.replace(/[^A-Za-z0-9+/=]/g, "");
+  const out: number[] = [];
+  for (let i = 0; i < clean.length; i += 4) {
+    const c1 = B64.indexOf(clean[i]);
+    const c2 = B64.indexOf(clean[i + 1]);
+    const c3 = B64.indexOf(clean[i + 2]);
+    const c4 = B64.indexOf(clean[i + 3]);
+    out.push(((c1 << 2) | (c2 >> 4)) & 0xff);
+    if (c3 >= 0) out.push(((c2 << 4) | (c3 >> 2)) & 0xff);
+    if (c4 >= 0) out.push(((c3 << 6) | c4) & 0xff);
+  }
+  return out;
+}
 /** рабочая папка движка-моста Omnirush (куда создаются новые сессии без папки) */
 const OMNI_HOME_DIR = "C:\\Users\\kiril";
 
@@ -305,6 +327,21 @@ class OpenCodeApi {
     return extractList(data)
       .map(parseMessage)
       .filter((x: any): x is RenderMessage => !!x);
+  }
+
+  /** залить картинку на ноутбук и вернуть путь, который видит сервер */
+  async uploadFile(uri: string, filename: string, mime: string): Promise<string> {
+    const b64 = await FileSystem.readAsStringAsync(uri, { encoding: EncodingType.Base64 });
+    // сервер пишет файл к себе: file:// телефона ему недоступен
+    const dir = this.omni ? OMNI_UPLOAD_DIR : UPLOAD_DIR;
+    const path = `${dir}/${Date.now()}-${filename.replace(/[^\w.-]/g, "_")}`;
+    const res = await fetch(`${this.base}/api/experimental/fs/write?path=${encodeURIComponent(path)}`, {
+      method: "POST",
+      headers: { ...this.headers(false, true) },
+      body: new Uint8Array(base64ToBytes(b64)),
+    } as any);
+    if (!res.ok) throw new ApiError(`Не удалось загрузить файл: ${res.status}`, res.status);
+    return path;
   }
 
   async prompt(sessionID: string, text: string, delivery?: "steer" | "queue", files?: PromptFile[]): Promise<void> {
