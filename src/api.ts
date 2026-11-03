@@ -363,9 +363,11 @@ class OpenCodeApi {
     } catch {
       /* маркер — best effort */
     }
+    // схема prompt (OpenAPI): text + files[{uri,name}]; поле parts сервер игнорирует
+    const fileAtt = (files ?? []).map((f) => ({ uri: f.url, name: f.filename }));
     const body: Record<string, unknown> = { text };
     if (delivery) body.delivery = delivery;
-    if (fileParts.length > 0) body.parts = [...(text ? [{ type: "text", text }] : []), ...fileParts];
+    if (fileAtt.length > 0) body.files = fileAtt;
     await this.req(`/api/session/${sessionID}/prompt`, { method: "POST", json: body });
   }
 
