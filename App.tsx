@@ -1,8 +1,10 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { StatusBar } from "expo-status-bar";
 import { Platform, Pressable, StatusBar as RNStatusBar, StyleSheet, Text, View } from "react-native";
 import { AsyncStorage } from "./src/store";
-import { OpenCodeApi, ServerKind } from "./src/api";
+import { OpenCodeApi, ServerKind, basicAuthHeader } from "./src/api";
+import { events, BusEvent } from "./src/events";
+import { initNotifications, notify, onTapped } from "./src/notifications";
 import SetupScreen from "./src/screens/SetupScreen";
 import HomeScreen from "./src/screens/HomeScreen";
 import ChatScreen from "./src/screens/ChatScreen";
@@ -25,6 +27,18 @@ export default function App() {
     url: "",
     password: "",
   });
+  // — статусы сессий для кружков на списке (сервер OpenCode, из SSE-потока) —
+  const [unread, setUnread] = useState<Set<string>>(new Set()); // синяя точка: закончилось, пока чат был закрыт
+  const unreadRef = useRef<Set<string>>(new Set()); // источник истины (без сайд-эффектов в updater'ах)
+  const [errors, setErrors] = useState<Set<string>>(new Set()); // красная точка: была ошибка
+  const [titles, setTitles] = useState<Record<string, string>>({}); // свежие имена из session.renamed
+  const curSessionRef = useRef<string | null>(null); // id открытого чата (null — на списке)
+
+  const applyUnread = (next: Set<string>) => {
+    unreadRef.current = next;
+    setUnread(next);
+    AsyncStorage.saveUnread("opencode", [...next]);
+  };
 
   useEffect(() => {
     (async () => {
@@ -44,6 +58,132 @@ export default function App() {
       }
     })();
   }, []);
+
+  // живой поток событий OpenCode (SSE): запускаем, пока выбран сервер OpenCode.
+  // Для Omnirush-форка события не запускаем — там остаётся поллинг.
+  useEffect(() => {
+    if (!api) return;
+    events.start(api.base, basicAuthHeader(api.cfg.password));
+    return () => events.stop();
+  }, [api]);
+
+  // синие точки: восстановили сохранённые «непрочитанные» при старте
+  useEffect(() => {
+    if (!api) return;
+    AsyncStorage.getUnread("opencode").then((ids) => {
+      const s = new Set(ids);
+      unreadRef.current = s;
+      setUnread(s);
+    });
+  }, [api]);
+
+  /** отметить сессию прочитанной (открыли чат / тап по уведомлению) */
+  const markRead = (sid: string) => {
+    if (!unreadRef.current.has(sid)) {
+      setErrors((prev) => (prev.has(sid) ? new Set([...prev].filter((x) => x !== sid)) : prev));
+      return;
+    }
+    const next = new Set(unreadRef.current);
+    next.delete(sid);
+    applyUnread(next);
+    setErrors((prev) => (prev.has(sid) ? new Set([...prev].filter((x) => x !== sid)) : prev));
+  };
+
+  /**
+   * Де-дуп уведомлений: сервер может прислать завершение дважды за один ран
+   * (session.execution.succeeded + session.idle), ошибку — тоже (execution.failed
+   * + session.error). В течение 5с на сессию (и тип) баннер только один;
+   * два реальных рана подряд (финиш >5с спустя) оба простучат.
+   */
+  const lastNotifyAt = useRef<Record<string, number>>({});
+  const notifyOnce = (key: string): boolean => {
+    const now = Date.now();
+    if (now - (lastNotifyAt.current[key] ?? 0) < 5_000) return false;
+    lastNotifyAt.current[key] = now;
+    return true;
+  };
+
+  // глобальные события → кружки на списке + уведомления.
+  // «Чат открыт» (curSessionRef) — там изменения и так видны, баннерами не шумим.
+  useEffect(() => {
+    if (!api) return;
+    const off = events.subscribe((e: BusEvent) => {
+      const sid = (e as { sessionID?: string }).sessionID;
+      if (!sid) return;
+      const chatOpen = curSessionRef.current === sid;
+      switch (e.kind) {
+        case "renamed":
+          setTitles((prev) => (prev[sid] === e.title ? prev : { ...prev, [sid]: e.title }));
+          break;
+        case "finished":
+          if (e.outcome === "success" && !chatOpen) {
+            const next = new Set(unreadRef.current);
+            next.add(sid);
+            applyUnread(next);
+            // название для строки уведомления — догоняем с сервера (best effort);
+            // succeeded+idle приходят парой — баннер только с первого
+            if (notifyOnce("done:" + sid)) {
+              api.sessionInfo(sid)
+                .then((s) => notify("✅ Готово", (s?.title ? String(s.title) : "чат") + " — агент закончил", { sessionID: sid }))
+                .catch(() => notify("✅ Готово", "агент закончил работу", { sessionID: sid }));
+            }
+          }
+          break;
+        case "error":
+          setErrors((prev) => {
+            const next = new Set(prev);
+            next.add(sid);
+            return next;
+          });
+          if (!chatOpen && notifyOnce("err:" + sid)) {
+            const body = (e.message ?? "ошибка").slice(0, 140);
+            api.sessionInfo(sid)
+              .then((s) => notify("⛔ Ошибка", (s?.title ? String(s.title) + " — " : "") + body, { sessionID: sid }))
+              .catch(() => notify("⛔ Ошибка", body, { sessionID: sid }));
+          }
+          break;
+        case "permission":
+          // агент ждёт разрешения — уведомление важно всегда (пользователь мог уйти в другое приложение)
+          const r = e.request;
+          const res = r.resources && r.resources[0] ? " " + r.resources[0].slice(0, 80) : "";
+          if (notifyOnce("perm:" + r.id)) {
+            api.sessionInfo(sid)
+              .then((s) => notify("✋ Нужно разрешение", (s?.title ? String(s.title) + " — " : "") + r.action + res, { sessionID: sid }))
+              .catch(() => notify("✋ Нужно разрешение", r.action + res, { sessionID: sid }));
+          }
+          break;
+        default:
+          break;
+      }
+    });
+    return () => {
+      off();
+    };
+  }, [api]);
+
+  // уведомления включаем один раз при появлении сервера OpenCode
+  useEffect(() => {
+    if (!api) return;
+    initNotifications();
+  }, [api]);
+
+  // тап по уведомлению → открыть сессию (hot + cold start)
+  useEffect(() => {
+    if (!api) return;
+    return onTapped((data) => {
+      const sid = data.sessionID;
+      if (!sid) return;
+      (async () => {
+        const s = await api.sessionInfo(sid).catch(() => null);
+        curSessionRef.current = sid;
+        setCurrentSession({ id: sid, directory: s?.directory ? String(s.directory) : "" });
+        setChatTab("opencode");
+        setTab("opencode");
+        setScreen("chat");
+        markRead(sid);
+      })();
+    });
+  }, [api]);
 
   if (screen === null) return null;
 
@@ -81,6 +221,20 @@ export default function App() {
   const homeApi = tab === "omnirush" ? omniApi : api;
   const chatApi = chatTab === "omnirush" ? omniApi : api;
 
+  // открыть чат: запоминаем «какой открыт» (события не должны дублировать баннерами) и снимаем точки
+  const openChat = (sessionID: string, directory: string, kind: ServerKind) => {
+    curSessionRef.current = sessionID;
+    setCurrentSession({ id: sessionID, directory });
+    setChatTab(kind);
+    setScreen("chat");
+    markRead(sessionID);
+  };
+  const closeChat = () => {
+    curSessionRef.current = null;
+    setCurrentSession(null);
+    setScreen("home");
+  };
+
   return (
     <Root>
       {screen === "chat" && currentSession && chatApi ? (
@@ -89,7 +243,7 @@ export default function App() {
           serverKind={chatTab}
           sessionID={currentSession.id}
           directory={currentSession.directory}
-          onBack={() => setScreen("home")}
+          onBack={closeChat}
         />
       ) : homeApi ? (
         <View style={{ flex: 1 }}>
@@ -99,11 +253,10 @@ export default function App() {
               key={tab}
               api={homeApi}
               serverKind={tab}
-              onOpen={(sessionID, directory) => {
-                setCurrentSession({ id: sessionID, directory });
-                setChatTab(tab);
-                setScreen("chat");
-              }}
+              unread={tab === "opencode" ? unread : undefined}
+              errors={tab === "opencode" ? errors : undefined}
+              titles={tab === "opencode" ? titles : undefined}
+              onOpen={(sessionID, directory) => openChat(sessionID, directory, tab)}
               onSettings={tab === "opencode" ? () => setScreen("setup") : undefined}
             />
           </View>

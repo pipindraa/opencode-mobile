@@ -1,0 +1,207 @@
+diff --git a/node_modules/@react-native-voice/voice/android/build.gradle b/node_modules/@react-native-voice/voice/android/build.gradle
+index 1f9c6f5..f21634f 100644
+--- a/node_modules/@react-native-voice/voice/android/build.gradle
++++ b/node_modules/@react-native-voice/voice/android/build.gradle
+@@ -1,18 +1,6 @@
+-buildscript {
+-  // Buildscript is evaluated before everything else so we can't use getExtOrDefault
+-  def kotlin_version = rootProject.ext.has("kotlinVersion") ? rootProject.ext.get("kotlinVersion") : project.properties["Voice_kotlinVersion"]
+-
+-  repositories {
+-    google()
+-    mavenCentral()
+-  }
+-
+-  dependencies {
+-    classpath "com.android.tools.build:gradle:7.2.1"
+-    // noinspection DifferentKotlinGradleVersion
+-    classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+-  }
+-}
++// buildscript-блок удалён: версии AGP и Kotlin-плагина берутся из корневых
++// buildscript-зависимостей приложения (AGP 9 через Expo version catalog).
++// Закреплённые здесь 7.2.1/1.7.0 конфликтуют с корнем (Gradle 9.4).
+ 
+ def reactNativeArchitectures() {
+   def value = rootProject.getProperties().get("reactNativeArchitectures")
+@@ -64,7 +52,6 @@ android {
+     minSdkVersion getExtOrIntegerDefault("minSdkVersion")
+     targetSdkVersion getExtOrIntegerDefault("targetSdkVersion")
+     buildConfigField "boolean", "IS_NEW_ARCHITECTURE_ENABLED", isNewArchitectureEnabled().toString()
+-
+   }
+ 
+   buildFeatures {
+@@ -77,10 +64,6 @@ android {
+     }
+   }
+ 
+-  lintOptions {
+-    disable "GradleCompatible"
+-  }
+-
+   compileOptions {
+     sourceCompatibility JavaVersion.VERSION_1_8
+     targetCompatibility JavaVersion.VERSION_1_8
+@@ -107,14 +90,12 @@ repositories {
+   google()
+ }
+ 
+-def kotlin_version = getExtOrDefault("kotlinVersion")
+-
+ dependencies {
+   // For < 0.71, this will be from the local maven repo
+   // For > 0.71, this will be replaced by `com.facebook.react:react-android:$version` by react gradle plugin
+   //noinspection GradleDynamicVersion
+   implementation "com.facebook.react:react-native:+"
+-  implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
++  // kotlin-stdlib добавляется автоматически Kotlin-плагина корня
+ }
+ 
+ if (isNewArchitectureEnabled()) {
+diff --git a/node_modules/@react-native-voice/voice/android/src/main/AndroidManifestNew.xml b/node_modules/@react-native-voice/voice/android/src/main/AndroidManifestNew.xml
+new file mode 100644
+index 0000000..0bbc6c3
+--- /dev/null
++++ b/node_modules/@react-native-voice/voice/android/src/main/AndroidManifestNew.xml
+@@ -0,0 +1,7 @@
++<manifest xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:tools="http://schemas.android.com/tools">
++
++    <uses-sdk tools:overrideLibrary="com.facebook.react" />
++    <uses-permission android:name="android.permission.RECORD_AUDIO" />
++    <uses-permission android:name="android.permission.INTERNET" />
++</manifest>
+diff --git a/node_modules/@react-native-voice/voice/android/src/main/VoiceSpec.kt b/node_modules/@react-native-voice/voice/android/src/main/VoiceSpec.kt
+index 3f0c1ce..2a0caf6 100644
+--- a/node_modules/@react-native-voice/voice/android/src/main/VoiceSpec.kt
++++ b/node_modules/@react-native-voice/voice/android/src/main/VoiceSpec.kt
+@@ -37,6 +37,10 @@ abstract class VoiceSpec internal constructor(context: ReactApplicationContext)
+     voice.isRecognizing(callback)
+   }
+ 
++  override fun getSpeechResults(callback: Callback) {
++    voice.getSpeechResults(callback)
++  }
++
+   override fun addListener(eventType: String) {
+ 
+   }
+diff --git a/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/Voice.kt b/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/Voice.kt
+index 58ba07b..08895ce 100644
+--- a/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/Voice.kt
++++ b/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/Voice.kt
+@@ -30,6 +30,11 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+   private var isRecognizing = false
+   private var locale: String? = null
+ 
++  // RN 0.88 (bridgeless): события RCTDeviceEventEmitter не доходят до JS,
++  // поэтому результат накапливаем здесь, а JS опрашивает getSpeechResults().
++  @Volatile private var lastResults: String = ""
++  @Volatile private var lastError: String? = null
++
+   private fun getLocale(locale: String?): String {
+     if (locale != null && locale != "") {
+       return locale
+@@ -122,6 +127,8 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+ 
+   private fun startSpeechWithPermissions(locale: String, opts: ReadableMap, callback: Callback) {
+     this.locale = locale
++    lastResults = ""
++    lastError = null
+ 
+     val mainHandler = Handler(reactContext.mainLooper)
+     mainHandler.post {
+@@ -237,10 +244,24 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+     callback.invoke(isRecognizing)
+   }
+ 
++  /**
++   * Накопленный результат (последний partial или финальный) и последняя ошибка.
++   * Поллинг-фолбэк для bridgeless: события не доходят, JS сам опрашивает.
++   */
++  fun getSpeechResults(callback: Callback) {
++    callback.invoke(lastResults, lastError)
++  }
++
+   private fun sendEvent(eventName: String, params: WritableMap) {
+-    reactContext
+-      .getJSModule(RCTDeviceEventEmitter::class.java)
+-      .emit(eventName, params)
++    try {
++      // bridgeless (RN 0.88+): getJSModule может вернуть null — не падаем,
++      // JS уведомляется через isRecognizing()/getSpeechResults()
++      reactContext
++        .getJSModule(RCTDeviceEventEmitter::class.java)
++        ?.emit(eventName, params)
++    } catch (e: Throwable) {
++      Log.d("ASR", "sendEvent($eventName) skipped: ${e.message}")
++    }
+   }
+ 
+   private fun getErrorText(errorCode: Int): String {
+@@ -288,16 +309,19 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+   }
+ 
+   override fun onEndOfSpeech() {
++    // флаг ставим ДО sendEvent: если emitter недоступен, опрос isRecognizing всё равно увидит конец
++    isRecognizing = false
+     val event = Arguments.createMap()
+     event.putBoolean("error", false)
+     sendEvent("onSpeechEnd", event)
+     Log.d("ASR", "onEndOfSpeech()")
+-    isRecognizing = false
+   }
+ 
+ 
+   override fun onError(error: Int) {
++    isRecognizing = false
+     val errorMessage = String.format("%d/%s", error, getErrorText(error))
++    lastError = errorMessage
+     val errorData = Arguments.createMap()
+     errorData.putString("message", errorMessage)
+     errorData.putString("code", java.lang.String.valueOf(errorMessage))
+@@ -315,6 +339,8 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+       for (result in matches) {
+         arr.pushString(result)
+       }
++      lastResults = matches.firstOrNull() ?: ""
++      lastError = null
+     }
+     val event = Arguments.createMap()
+     event.putArray("value", arr)
+@@ -330,6 +356,7 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+       for (result in it) {
+         arr.pushString(result)
+       }
++      lastResults = it.firstOrNull() ?: lastResults
+     }
+ 
+     val event = Arguments.createMap()
+diff --git a/node_modules/@react-native-voice/voice/android/src/newarch/VoiceSpec.kt b/node_modules/@react-native-voice/voice/android/src/newarch/VoiceSpec.kt
+index 3f0c1ce..2a0caf6 100644
+--- a/node_modules/@react-native-voice/voice/android/src/newarch/VoiceSpec.kt
++++ b/node_modules/@react-native-voice/voice/android/src/newarch/VoiceSpec.kt
+@@ -37,6 +37,10 @@ abstract class VoiceSpec internal constructor(context: ReactApplicationContext)
+     voice.isRecognizing(callback)
+   }
+ 
++  override fun getSpeechResults(callback: Callback) {
++    voice.getSpeechResults(callback)
++  }
++
+   override fun addListener(eventType: String) {
+ 
+   }
+diff --git a/node_modules/@react-native-voice/voice/src/NativeVoiceAndroid.ts b/node_modules/@react-native-voice/voice/src/NativeVoiceAndroid.ts
+index f2ac10e..c7fd111 100644
+--- a/node_modules/@react-native-voice/voice/src/NativeVoiceAndroid.ts
++++ b/node_modules/@react-native-voice/voice/src/NativeVoiceAndroid.ts
+@@ -21,6 +21,7 @@ export interface Spec extends TurboModule {
+   ) => void;
+   getSpeechRecognitionServices(): Promise<string[]>;
+   isRecognizing: (callback: (Recognizing: boolean) => void) => void;
++  getSpeechResults: (callback: (results: string, error: string) => void) => void;
+   addListener: (eventType: string) => void;
+   removeListeners: (count: number) => void;
+ }

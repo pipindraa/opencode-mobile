@@ -17,9 +17,15 @@ import {
   Keyboard,
   KeyboardEvent,
   ScrollView,
+  Platform,
+  PermissionsAndroid,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
-import { OpenCodeApi, RenderMessage, RenderPart, Decision, ServerKind, PromptFile } from "../api";
+import { File, Paths, Directory } from "expo-file-system";
+import { voiceNative } from "../voice";
+import Clipboard from "@react-native-clipboard/clipboard";
+import { OpenCodeApi, RenderMessage, RenderPart, Decision, ServerKind, PromptFile, basicAuthHeader } from "../api";
+import { subscribeSession, BusEvent, PermissionRequest } from "../events";
 import { AsyncStorage } from "../store";
 import { colors, spacing, fontSize } from "../theme";
 
@@ -49,6 +55,26 @@ const POLL_MS = 1600;
 
 type ModelRow = { id: string; providerID: string; name: string; variants: string[] };
 
+/** кусок стримящегося ответа: текстовые блоки по ordinal + инструменты по id */
+interface StreamMsg {
+  texts: { [ordinal: string]: string };
+  tools: { [id: string]: { label: string; state: string } };
+}
+
+/** название инструмента по форме input (в событии имени нет) */
+function guessTool(input: any): string {
+  if (!input || typeof input !== "object") return "инструмент";
+  const k = Object.keys(input);
+  if (k.includes("command")) return "shell";
+  if (k.includes("path") && (k.includes("content") || k.includes("text"))) return "write file";
+  if (k.includes("file_path") && k.includes("old_string")) return "edit";
+  if (k.includes("oldString") && k.includes("newString")) return "edit";
+  if (k.includes("pattern") || k.includes("glob") || k.includes("query")) return "search";
+  if (k.includes("url")) return "fetch";
+  if (k.includes("code")) return "execute";
+  return "инструмент";
+}
+
 function fmtTok(n: any): string {
   const v = Number(n) || 0;
   if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
@@ -71,7 +97,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   const [info, setInfo] = useState<any>(null);
   const [models, setModels] = useState<ModelRow[]>([]);
   const [agents, setAgents] = useState<{ id: string; name: string }[]>([]);
-  const [sheet, setSheet] = useState<null | "model" | "agent" | "ctx">(null);
+  const [sheet, setSheet] = useState<null | "model" | "agent" | "ctx" | "files">(null);
   const [mq, setMq] = useState("");
   const [expandedModel, setExpandedModel] = useState<string | null>(null);
   const [ctxCount, setCtxCount] = useState<number | null>(null);
@@ -89,6 +115,18 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   const [attachments, setAttachments] = useState<{ uri: string; mime: string; filename: string }[]>([]);
   /** меню вложений: галерея / камера */
   const [attachMenu, setAttachMenu] = useState(false);
+  /** живой стрим ответа: что прилетело по SSE, но ещё не в снимке сервера. key — messageID */
+  const [stream, setStream] = useState<{ [messageID: string]: StreamMsg }>({});
+  const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // — голосовой ввод: тап 🎤 → дикт → вставляется в поле, без авто-отправки —
+  const [voiceOn, setVoiceOn] = useState(false);
+  const [dictation, setDictation] = useState("");
+  const dictRef = useRef("");
+  // — файлы сессии (что агент изменил/создал) —
+  const [files, setFiles] = useState<{ path: string; last: number }[] | null>(null);
+  const [fileBusy, setFileBusy] = useState<string | null>(null);
+  const [filePreview, setFilePreview] = useState<string | null>(null);
+  const [fileErr, setFileErr] = useState<string | null>(null);
 
   const modelKey = (m: ModelRow) => `${m.providerID}/${m.id}`;
 
@@ -276,6 +314,17 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   }, [api, sessionID]);
 
 
+  /** отложенная синхронизация с сервером (дженгл из событий: много событий за раз — один запрос) */
+  const scheduleSync = useCallback(
+    (ms: number) => {
+      if (syncTimer.current) clearTimeout(syncTimer.current);
+      syncTimer.current = setTimeout(() => {
+        loadMessages();
+      }, ms);
+    },
+    [loadMessages]
+  );
+
   const pollState = useCallback(async () => {
     try {
       const [active, pending, sess] = await Promise.all([
@@ -301,12 +350,118 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
 
   useEffect(() => {
     loadMessages();
+    pollState();
+    // поллинг — только страховка (быстрые изменения приходят по SSE-событиям):
+    // занят/разрешения/инфо раз в 5с, транскрипт — раз в 30с на случай пропущенных событий
     const t = setInterval(() => {
-      loadMessages();
       pollState();
-    }, POLL_MS);
-    return () => clearInterval(t);
+    }, 5000);
+    const t2 = setInterval(() => {
+      loadMessages();
+    }, 30000);
+    return () => {
+      clearInterval(t);
+      clearInterval(t2);
+    };
   }, [loadMessages, pollState]);
+
+  // живой стрим (SSE): текст по мере генерации, busy/perm/error/renamed — мгновенно
+  useEffect(() => {
+    if (serverKind === "omnirush") return; // у форка нет /api/event — остаётся поллинг
+    const off = subscribeSession(sessionID, (e: BusEvent) => {
+      switch (e.kind) {
+        case "connected":
+          // после (пере)подключения — догоняемся: могли пропустить события
+          loadMessages();
+          pollState();
+          break;
+        case "status":
+          busyRef.current = e.busy;
+          setBusy(e.busy);
+          setBusySince((prev) => (e.busy ? prev ?? Date.now() : null));
+          if (!e.busy) {
+            setActivity("");
+            setStream({});
+          }
+          break;
+        case "finished":
+          busyRef.current = false;
+          setBusy(false);
+          setBusySince(null);
+          setActivity("");
+          setStream({});
+          scheduleSync(300); // финальный снимок: завершённое сообщение берём с сервера
+          break;
+        case "text-delta": {
+          if (!e.messageID) break;
+          setStream((prev) => {
+            const cur = prev[e.messageID] ?? { texts: {}, tools: {} };
+            const ord = String(e.ordinal);
+            return {
+              ...prev,
+              [e.messageID]: { ...cur, texts: { ...cur.texts, [ord]: (cur.texts[ord] ?? "") + e.delta } },
+            };
+          });
+          setActivity("✍️ печатает ответ");
+          break;
+        }
+        case "text-ended":
+          scheduleSync(250);
+          break;
+        case "tool": {
+          if (!e.messageID) break;
+          setStream((prev) => {
+            const cur = prev[e.messageID] ?? { texts: {}, tools: {} };
+            if (e.state === "running") {
+              return {
+                ...prev,
+                [e.messageID]: {
+                  ...cur,
+                  tools: { ...cur.tools, [e.id]: { label: guessTool(e.input), state: "running" } },
+                },
+              };
+            }
+            const ex = cur.tools[e.id];
+            if (!ex) return prev; // called не видели (чат открылся позже) — не додумываем
+            return {
+              ...prev,
+              [e.messageID]: { ...cur, tools: { ...cur.tools, [e.id]: { ...ex, state: e.state } } },
+            };
+          });
+          if (e.state === "running") setActivity(`⚙ ${guessTool(e.input)}`);
+          break;
+        }
+        case "permission": {
+          const r: PermissionRequest = e.request;
+          const res = r.resources && r.resources[0] ? " " + r.resources[0].slice(0, 60) : "";
+          setPerms((prev) =>
+            prev.some((p) => p.requestID === r.id)
+              ? prev
+              : [...prev, { requestID: r.id, label: `${r.action}${res}` }]
+          );
+          break;
+        }
+        case "permission-replied":
+          setPerms((prev) => prev.filter((p) => p.requestID !== e.requestID));
+          break;
+        case "error":
+          setError(e.message);
+          break;
+        case "renamed":
+          setSessionTitle(e.title);
+          break;
+        case "messages-changed":
+          scheduleSync(300);
+          break;
+        default:
+          break;
+      }
+    });
+    return () => {
+      off();
+      if (syncTimer.current) clearTimeout(syncTimer.current);
+    };
+  }, [sessionID, serverKind, loadMessages, pollState, scheduleSync]);
 
   // «бегущие» точки индикатора: обновляем строку раз в 500 мс, только пока агент занят
   useEffect(() => {
@@ -437,6 +592,15 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   };
 
   /** откат: убрать из контекста всё, начиная с выбранного сообщения */
+  const revertNow = async (b: ChatBubble) => {
+    try {
+      await api.revert(sessionID, b.id as string);
+      await loadMessages();
+      await pollState();
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    }
+  };
   const doRevert = (b: ChatBubble) => {
     if (!b.id) return;
     Alert.alert("Откатить чат?", "Все сообщения начиная с этого уйдут из контекста.", [
@@ -444,17 +608,36 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       {
         text: "Откатить",
         style: "destructive",
-        onPress: async () => {
-          try {
-            await api.revert(sessionID, b.id as string);
-            await loadMessages();
-            await pollState();
-          } catch (e: any) {
-            setError(e?.message ?? String(e));
-          }
-        },
+        onPress: () => revertNow(b),
       },
     ]);
+  };
+
+  /** копировать весь текст пузыря */
+  const [copied, setCopied] = useState(false);
+  const copyBubble = (b: ChatBubble) => {
+    const txt = b.parts
+      .filter((p) => p.kind === "text")
+      .map((p) => p.text)
+      .join("\n\n")
+      .trim();
+    if (!txt) return;
+    Clipboard.setString(txt);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  /** режим выделения части текста: selectable на Text → системные ручки Android */
+  const [selectKey, setSelectKey] = useState<string | null>(null);
+
+  const onBubbleLongPress = (b: ChatBubble) => {
+    const hasText = b.parts.some((p) => p.kind === "text" && (p as any).text.trim());
+    const opts: { text: string; style?: "default" | "cancel" | "destructive"; onPress?: () => void }[] = [];
+    if (hasText) opts.push({ text: "Копировать всё", onPress: () => copyBubble(b) });
+    if (hasText) opts.push({ text: "Выделить часть", onPress: () => setSelectKey(b.key) });
+    if (b.id) opts.push({ text: "Откатить с этого", style: "destructive", onPress: () => doRevert(b) });
+    opts.push({ text: "Отмена", style: "cancel" });
+    Alert.alert(b.role === "user" ? "Твоё сообщение" : "Ответ агента", "", opts);
   };
 
   const decide = async (requestID: string, decision: Decision) => {
@@ -482,13 +665,191 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     }
   };
 
+  // ————————————————— голосовой ввод —————————————————
+  // тап 🎤 → диктуем → текст вставляется в поле (без авто-отправки).
+  // Второй тап (⏹ / «Готово») — стоп. RN 0.88 bridgeless: события модуля не
+  // доходят, поэтому JS опрашивает isRecognizing() + getSpeechResults() —
+  // пока идёт речь, обновляем живую строку; когда кончилась — забираем текст.
+  const stoppingRef = useRef(false);
+
+  const toggleVoice = async () => {
+    if (voiceOn) {
+      stoppingRef.current = true;
+      voiceNative.stop();
+      return;
+    }
+    if (!voiceNative.available()) {
+      setError("Голос: модуль недоступен в этой сборке");
+      return;
+    }
+    setError(null);
+    if (Platform.OS === "android") {
+      try {
+        const st = await PermissionsAndroid.request("android.permission.RECORD_AUDIO");
+        if (st !== "granted") {
+          setError("Нет доступа к микрофону — разреши в настройках Android");
+          return;
+        }
+      } catch (e: any) {
+        setError("Микрофон недоступен: " + (e?.message ?? e));
+        return;
+      }
+    }
+    stoppingRef.current = false;
+    try {
+      dictRef.current = "";
+      setDictation("");
+      await voiceNative.start("ru-RU");
+      setVoiceOn(true);
+    } catch (e: any) {
+      setError("Микрофон не запустился: " + (e?.message ?? e));
+    }
+  };
+
+  useEffect(() => {
+    if (!voiceOn) return;
+    let finished = false;
+    let collectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const collect = async () => {
+      if (finished) return;
+      finished = true;
+      const { text, error } = await voiceNative.getSpeechResults();
+      const t = text.trim();
+      setVoiceOn(false);
+      setDictation("");
+      dictRef.current = "";
+      if (t) {
+        setInput((prev) => (prev ? prev.trimEnd() + " " + t : t));
+      } else if (error && !stoppingRef.current) {
+        // «No speech input»/ошибка при спонтанном конце — показываем;
+        // при ручном стопе молча закрываем
+        setError("Голос: " + error);
+      }
+    };
+
+    const tick = async () => {
+      if (finished) return;
+      const recognizing = await voiceNative.isRecognizing();
+      if (recognizing) {
+        // живая строка: последний partial с опозданием ~0.7с
+        const { text } = await voiceNative.getSpeechResults();
+        if (text && text !== dictRef.current) {
+          dictRef.current = text;
+          setDictation(text);
+        }
+        return;
+      }
+      // речь кончилась (тишина / ошибка / ручной стоп) — даём нативу
+      // донести onResults после stopListening, потом забираем текст
+      collectTimer = setTimeout(collect, 800);
+    };
+
+    const id = setInterval(tick, 700);
+    return () => {
+      clearInterval(id);
+      if (collectTimer) clearTimeout(collectTimer);
+    };
+  }, [voiceOn]);
+
+  // при выходе из чата голос глушим (иначе микрофон ждёт в фоне)
+  useEffect(
+    () => () => {
+      voiceNative.stop();
+    },
+    []
+  );
+
+  // ————————————————— файлы сессии (блок E) —————————————————
+  // Сервер отдаёт файлы только из своего корня (C:\Users\kiril). Файлы на D:
+  // скачаться не могут — для них только «скопировать путь» (⧉).
+  const IMG_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
+  const fsNorm = (p: string) => p.replace(/\\/g, "/");
+
+  const openFiles = async () => {
+    setSheet("files");
+    setFileErr(null);
+    try {
+      setFiles(await api.sessionFiles(sessionID));
+    } catch (e: any) {
+      setFileErr(e?.message ?? String(e));
+    }
+  };
+
+  /** скачать файл из корня сервера в documents/downloads/ и вернуть локальный File */
+  const fetchFile = async (p: string) => {
+    const name = p.split(/[\\/]/).pop() ?? "file";
+    const dir = new Directory(Paths.document, "downloads");
+    if (!dir.exists) dir.create({ idempotent: true, intermediates: true });
+    const dest = new File(dir, Date.now() + "-" + name);
+    return await File.downloadFileAsync(api.fsReadURL(fsNorm(p)), dest, {
+      headers: { Authorization: basicAuthHeader(api.cfg.password) },
+    });
+  };
+
+  const onFileTap = async (f: { path: string; last: number }) => {
+    if (fileBusy) return;
+    setFileErr(null);
+    setFileBusy(f.path);
+    try {
+      const file = await fetchFile(f.path);
+      if (IMG_RE.test(f.path)) {
+        setFilePreview(file.uri); // картинка — превью в приложении
+      } else {
+        try {
+          await file.preview(); // открыть системным приложением (просмотр/сохранить)
+        } catch (e: any) {
+          setFileErr("Не удалось открыть — файл скачан: " + file.uri);
+        }
+      }
+    } catch (e: any) {
+      setFileErr(
+        "Не удалось скачать (" + (e?.message ?? e) + "). Сервер отдаёт файлы только из C:\\Users\\kiril — " +
+          "если файл на D:, скопируй путь ⧉ и забирай вручную."
+      );
+    } finally {
+      setFileBusy(null);
+    }
+  };
+
+  const copyPath = async (p: string) => {
+    try {
+      await Clipboard.setString(p);
+      setFileErr(null);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* ignore */
+    }
+  };
+
   const title = sessionTitle || directory.replace(/\\/g, "/").split("/").filter(Boolean).pop() || "сессия";
   /** сколько секунд уже работает агент — для плашки «работает 12с» */
   const busySec = busy && busySince ? Math.max(1, Math.round((Date.now() - busySince) / 1000)) : 0;
   const statusText = perms.length > 0 ? "✋ ждёт твоего разрешения" : activity || "🧠 думает";
 
+  // пузыри стрима: хвост печатающегося ответа — в чате до того, как дошёл снимок сервера
+  const streamBubbles = useMemo(() => {
+    const out: ChatBubble[] = [];
+    for (const mid of Object.keys(stream)) {
+      if (bubbles.some((b) => b.id === mid)) continue; // уже пришёл с сервера
+      const sm = stream[mid];
+      const parts: RenderPart[] = [];
+      for (const ord of Object.keys(sm.texts).sort((a, b) => Number(a) - Number(b))) {
+        const t = sm.texts[ord];
+        if (t && t.trim()) parts.push({ kind: "text", text: t });
+      }
+      for (const tid of Object.keys(sm.tools)) {
+        const tl = sm.tools[tid];
+        parts.push({ kind: "tool", label: tl.label, state: tl.state });
+      }
+      if (parts.length > 0) out.push({ key: `stream-${mid}`, id: mid, role: "assistant", parts });
+    }
+    return out;
+  }, [bubbles, stream]);
+
   // инвертированный список: показываем снизу вверх — скролл никогда не дёргается
-  const reversed = useMemo(() => [...bubbles].reverse(), [bubbles]);
+  const reversed = useMemo(() => [...bubbles, ...streamBubbles].reverse(), [bubbles, streamBubbles]);
 
   const cur = info?.model;
   const modelName =
@@ -522,7 +883,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
 
       {error && <Text style={s.err}>⚠ {error}</Text>}
 
-      {/* инфо-строка: модель / агент / статистика */}
+      {/* инфо-строка: модель / агент / статистика / файлы */}
       <View style={s.infoRow}>
         <Pressable style={s.chip} onPress={() => { loadModels(); setSheet("model"); }}>
           <Text style={s.chipText} numberOfLines={1}>🤖 {modelLabel} ▾</Text>
@@ -530,6 +891,11 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         <Pressable style={s.chip} onPress={() => { loadAgents(); setSheet("agent"); }}>
           <Text style={s.chipText} numberOfLines={1}>🧩 {agentLabel} ▾</Text>
         </Pressable>
+        {serverKind === "opencode" && (
+          <Pressable style={s.chip} onPress={openFiles}>
+            <Text style={s.chipText} numberOfLines={1}>📁 Файлы</Text>
+          </Pressable>
+        )}
         <Pressable style={[s.chip, { marginLeft: "auto" }]} onPress={() => { loadContext(); setSheet("ctx"); }}>
           <Text style={s.chipText} numberOfLines={1}>📊 {tokLabel}</Text>
         </Pressable>
@@ -548,6 +914,24 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </View>
       )}
 
+      {/* режим выделения части текста: системные ручки Android + кнопка выхода */}
+      {selectKey && (
+        <View style={s.selBar}>
+          <Text style={s.selBarText} numberOfLines={2}>
+            Выдели текст: нажми и держи на слове, растяни ручки, «Копировать» из меню
+          </Text>
+          <Pressable style={s.selBarBtn} onPress={() => setSelectKey(null)}>
+            <Text style={{ color: "#fff", fontWeight: "700" }}>Готово</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {copied && (
+        <View style={s.copiedBar}>
+          <Text style={{ color: "#0a2", fontWeight: "700" }}>✓ Скопировано</Text>
+        </View>
+      )}
+
       <FlatList
         data={reversed}
         inverted
@@ -556,18 +940,23 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         ItemSeparatorComponent={() => <View style={{ height: spacing.s }} />}
         renderItem={({ item }) => {
           const isUser = item.role === "user";
+          const selecting = selectKey === item.key;
+          const isStreamBubble = item.key.startsWith("stream-");
           return (
             <View style={{ paddingHorizontal: spacing.l, flexDirection: "row", justifyContent: isUser ? "flex-end" : "flex-start" }}>
               <Pressable
-                onLongPress={() => doRevert(item)}
+                onLongPress={selecting ? undefined : () => onBubbleLongPress(item)}
                 delayLongPress={400}
                 style={[s.bubble, isUser ? s.bubbleUser : s.bubbleBot]}
               >
                 {item.parts.map((p: RenderPart, i: number) => {
                   if (p.kind === "text") {
+                    // курсор «печатает…» — на хвосте стрим-пузыря, пока агент работает
+                    const cursor = isStreamBubble && busy && i === item.parts.length - 1 ? " ▍" : "";
                     return (
-                      <Text key={i} style={[s.bubbleText, isUser && { color: "#fff" }]}>
+                      <Text key={i} selectable={selecting} style={[s.bubbleText, isUser && { color: "#fff" }]}>
                         {p.text}
+                        {cursor}
                       </Text>
                     );
                   }
@@ -742,6 +1131,41 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                 )}
               </>
             )}
+            {sheet === "files" && (
+              <>
+                <Text style={s.sheetTitle}>📁 Файлы сессии</Text>
+                {fileErr && <Text style={s.err}>{fileErr}</Text>}
+                <FlatList
+                  data={files ?? []}
+                  keyExtractor={(f) => f.path}
+                  style={{ maxHeight: 420 }}
+                  ItemSeparatorComponent={() => <View style={{ height: spacing.xs }} />}
+                  ListEmptyComponent={
+                    <Text style={s.empty}>Агент ещё не трогал файлы в этой сессии (или сессия короткая).</Text>
+                  }
+                  renderItem={({ item }) => (
+                    <View style={[s.card, { marginHorizontal: 0, flexDirection: "row", alignItems: "center" }]}>
+                      <Pressable style={{ flex: 1 }} onPress={() => onFileTap(item)} disabled={fileBusy != null}>
+                        <Text style={s.cardTitle} numberOfLines={1}>
+                          {fileBusy === item.path ? "⏳ " : IMG_RE.test(item.path) ? "🖼 " : "📄 "}
+                          {item.path.split(/[\\/]/).pop()}
+                        </Text>
+                        <Text style={s.cardDir} numberOfLines={1}>
+                          {item.path}
+                        </Text>
+                      </Pressable>
+                      <Pressable hitSlop={8} style={{ paddingLeft: spacing.m }} onPress={() => copyPath(item.path)}>
+                        <Text style={{ color: colors.textDim, fontSize: fontSize.l }}>⧉</Text>
+                      </Pressable>
+                    </View>
+                  )}
+                />
+                <Text style={s.hint}>
+                  Картинка — тапай для превью, остальное — скачать (chooser «поделиться»). Сервер отдаёт файлы
+                  только из C:\Users\kiril: файлы на D: не скачаются — копируй путь ⧉.
+                </Text>
+              </>
+            )}
             <Pressable style={[s.btn, s.btnGhost]} onPress={() => setSheet(null)}>
               <Text style={[s.btnText, { color: colors.text }]}>Закрыть</Text>
             </Pressable>
@@ -749,9 +1173,26 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </View>
       </Modal>
 
+      {/* строка диктовки: тап по 🎤 ещё раз — вставить в поле */}
+      {voiceOn && (
+        <View style={s.selBar}>
+          <Text style={s.selBarText} numberOfLines={1}>
+            🎤 {dictation || "Слушаю — говори…"}
+          </Text>
+          <Pressable style={s.selBarBtn} onPress={toggleVoice}>
+            <Text style={{ color: "#fff", fontWeight: "700" }}>Готово</Text>
+          </Pressable>
+        </View>
+      )}
+
       <View style={s.inputRow}>
         <Pressable style={s.attachBtn} onPress={() => setAttachMenu(true)}>
           <Text style={{ color: colors.textDim, fontSize: fontSize.xl }}>📎</Text>
+        </Pressable>
+        <Pressable style={s.attachBtn} onPress={toggleVoice}>
+          <Text style={{ color: voiceOn ? colors.danger : colors.textDim, fontSize: fontSize.xl }}>
+            {voiceOn ? "⏹" : "🎤"}
+          </Text>
         </Pressable>
         <TextInput
           style={s.input}
@@ -817,6 +1258,21 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
           </View>
         </Pressable>
       </Modal>
+
+      {/* превью скачанной картинки: тап — закрыть */}
+      <Modal visible={filePreview != null} transparent animationType="fade" onRequestClose={() => setFilePreview(null)}>
+        <View style={s.overlay}>
+          <Pressable
+            style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.l }}
+            onPress={() => setFilePreview(null)}
+          >
+            {filePreview ? (
+              <Image source={{ uri: filePreview }} style={{ width: "100%", maxHeight: "75%" }} resizeMode="contain" />
+            ) : null}
+            <Text style={{ color: colors.textDim, marginTop: spacing.m }}>тап по экрану — закрыть</Text>
+          </Pressable>
+        </View>
+      </Modal>
     </Animated.View>
   );
 }
@@ -876,6 +1332,27 @@ const s = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: spacing.m,
     paddingVertical: 6,
+  },
+  selBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.s,
+    marginHorizontal: spacing.l,
+    marginBottom: spacing.s,
+    padding: spacing.s,
+    borderRadius: 10,
+    backgroundColor: colors.surface2,
+  },
+  selBarText: { color: colors.textDim, fontSize: fontSize.s, flex: 1 },
+  selBarBtn: {
+    backgroundColor: colors.accent,
+    borderRadius: 8,
+    paddingHorizontal: spacing.m,
+    paddingVertical: 4,
+  },
+  copiedBar: {
+    alignItems: "center",
+    paddingVertical: 2,
   },
   attachBtn: { paddingHorizontal: spacing.s, paddingBottom: 8 },
   attachRow: { maxHeight: 76, paddingHorizontal: spacing.l, paddingBottom: spacing.s },

@@ -323,7 +323,13 @@ class OpenCodeApi {
       }
       return [];
     }
-    const data = await this.req("/api/session/active");
+    // v2: {data: {ses_id: {type: "running"}}} — ОБЪЕКТ, не массив
+    // (был баг: ждали массив → [] → busy=false → кнопка Стоп исчезала)
+    const data: any = await this.req("/api/session/active");
+    const map = data?.data ?? data;
+    if (map && typeof map === "object" && !Array.isArray(map)) {
+      return Object.keys(map);
+    }
     return extractList(data)
       .map((s: any) => String(s?.id ?? s?.sessionID ?? ""))
       .filter(Boolean);
@@ -347,6 +353,44 @@ class OpenCodeApi {
     return extractList(data)
       .map(parseMessage)
       .filter((x: any): x is RenderMessage => !!x);
+  }
+
+  /**
+   * Какие файлы агент тронул в этой сессии — из tool-частей транскрипта
+   * (у edit/write read в state.metadata.files лежит путь). Пути уникальные,
+   * order — время появления в чате.
+   */
+  async sessionFiles(sessionID: string, limit = 200): Promise<{ path: string; last: number }[]> {
+    if (this.omni) return [];
+    const data: any = await this.req(`/api/session/${sessionID}/message?limit=${limit}`);
+    const msgs = extractList(data);
+    const seen = new Map<string, number>();
+    /** путь (абсолютный или относительный корню сервера) → время последнего касания */
+    const addPath = (raw: any, ts: number) => {
+      if (typeof raw === "string" && raw) seen.set(raw, Math.max(seen.get(raw) ?? 0, ts || 0));
+    };
+    for (const m of msgs) {
+      const info = m?.info ?? m;
+      const parts: any[] = Array.isArray(info?.parts) ? info.parts : Array.isArray(info?.content) ? info.content : [];
+      const ts = Number(info?.time?.created ?? 0) || 0;
+      for (const p of parts) {
+        // edit: state.metadata.files — [{file, patch, status, additions, deletions}]
+        const files = p?.state?.metadata?.files;
+        if (Array.isArray(files)) {
+          for (const f of files) addPath(typeof f?.file === "string" ? f.file : f?.path, ts);
+        }
+        // read / edit / write: state.input.path (в сборке 2.2.4 у write/read его в metadata нет)
+        addPath(p?.state?.input?.path, ts);
+      }
+    }
+    return [...seen.entries()]
+      .map(([path, last]) => ({ path, last }))
+      .sort((a, b) => b.last - a.last);
+  }
+
+  /** URL, по которому сервер отдаёт файл из своей файловой системы (для скачивания/превью) */
+  fsReadURL(path: string): string {
+    return `${this.base}/api/fs/read/${encodeURI(path)}`;
   }
 
   /** залить картинку на ноутбук и вернуть путь, который видит сервер */

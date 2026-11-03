@@ -39,4 +39,17 @@ export const AsyncStorage = {
   async saveChatFavs(server: ServerKind, ids: string[]): Promise<void> {
     await AsyncStorageInternal.setItem(PREFIX + "chatFavs." + server, JSON.stringify(ids));
   },
+  /** непрочитанные сессии (закончилось, пока чат был закрыт) — для синих точек */
+  async getUnread(server: ServerKind): Promise<string[]> {
+    try {
+      const raw = await AsyncStorageInternal.getItem(PREFIX + "unread." + server);
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr.filter((x: any) => typeof x === "string") : [];
+    } catch {
+      return [];
+    }
+  },
+  async saveUnread(server: ServerKind, ids: string[]): Promise<void> {
+    await AsyncStorageInternal.setItem(PREFIX + "unread." + server, JSON.stringify(ids));
+  },
 };

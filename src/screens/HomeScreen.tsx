@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -25,6 +25,12 @@ interface Props {
   onOpen: (sessionID: string, directory: string) => void;
   /** ⚙ настройки — только для сервера OpenCode */
   onSettings?: () => void;
+  /** синие точки: закончилось, пока чат был закрыт (сервер OpenCode, из SSE) */
+  unread?: Set<string>;
+  /** красные точки: была ошибка */
+  errors?: Set<string>;
+  /** свежие названия из session.renamed (пока поллинг не обновило) */
+  titles?: Record<string, string>;
 }
 
 interface SessionItem {
@@ -50,7 +56,7 @@ function timeLabel(ts: number): string {
   return new Date(ts).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
 }
 
-export default function HomeScreen({ api, serverKind, onOpen, onSettings }: Props) {
+export default function HomeScreen({ api, serverKind, onOpen, onSettings, unread, errors, titles }: Props) {
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -60,6 +66,19 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings }: Prop
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [activeCount, setActiveCount] = useState(0);
   const [favs, setFavs] = useState<Set<string>>(new Set());
+  /** поиск по названию и папке */
+  const [q, setQ] = useState("");
+  /** «только что закончилось» по поллингу (для Omnirush, где нет SSE; для OpenCode — страховка) */
+  const [justDone, setJustDone] = useState<Set<string>>(new Set());
+  const prevActiveRef = useRef<Set<string> | null>(null);
+
+  const isUnread = (id: string) => (unread?.has(id) ?? false) || justDone.has(id);
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    if (!needle) return sessions;
+    return sessions.filter((x) => (x.title + " " + x.directory).toLowerCase().includes(needle));
+  }, [sessions, q]);
 
   // избранное чатов этого сервера — живёт только на телефоне
   useEffect(() => {
@@ -97,6 +116,13 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings }: Prop
         api.pendingPermissions().catch(() => [] as any[]),
       ]);
       const activeSet = new Set(activeIDs);
+      // смена active → finished: отмечаем «только что закончилось» (синяя точка)
+      if (prevActiveRef.current) {
+        for (const id of prevActiveRef.current) {
+          if (!activeSet.has(id)) setJustDone((prev) => new Set(prev).add(id));
+        }
+      }
+      prevActiveRef.current = activeSet;
       const list: SessionItem[] = s.map((x) => ({
         ...x,
         active: activeSet.has(x.id),
@@ -181,6 +207,25 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings }: Prop
         </Pressable>
       )}
 
+      {/* поиск по названию и папке сессии */}
+      <View style={s.searchWrap}>
+        <Text style={s.searchIcon}>🔍</Text>
+        <TextInput
+          style={s.searchInput}
+          value={q}
+          onChangeText={setQ}
+          placeholder="Поиск по сессиям…"
+          placeholderTextColor={colors.textDim}
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+        {q.length > 0 && (
+          <Pressable hitSlop={10} onPress={() => setQ("")}>
+            <Text style={{ color: colors.textDim, fontSize: fontSize.m }}>✕</Text>
+          </Pressable>
+        )}
+      </View>
+
       {loading && sessions.length === 0 ? (
         <ActivityIndicator color={colors.accent} style={{ marginTop: spacing.xl }} />
       ) : (
@@ -188,13 +233,13 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings }: Prop
           data={(() => {
             const rows: ({ kind: "h"; key: string; label: string } | { kind: "s"; key: string; item: SessionItem })[] = [];
             // избранное — закреплено сверху отдельной секцией (как у моделей)
-            const favsList = sessions.filter((it) => favs.has(it.id));
+            const favsList = filtered.filter((it) => favs.has(it.id));
             if (favsList.length > 0) {
               rows.push({ kind: "h", key: "h_favs", label: "★ Избранное" });
               for (const it of favsList) rows.push({ kind: "s", key: it.id, item: it });
             }
             let last = "";
-            for (const it of sessions) {
+            for (const it of filtered) {
               if (favs.has(it.id)) continue;
               const label = dayLabel(it.timeCreated);
               if (label !== last) {
@@ -216,16 +261,28 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings }: Prop
             }
             const it = item.item;
             const isFav = favs.has(it.id);
+            // статус-кружок: работает (спиннер) > ошибка (красная) > непрочитано (синяя)
+            const status = it.active ? (
+              <ActivityIndicator size="small" color={colors.accent} style={s.statusDot} />
+            ) : errors?.has(it.id) ? (
+              <View style={[s.statusDot, { backgroundColor: colors.danger }]} />
+            ) : isUnread(it.id) ? (
+              <View style={[s.statusDot, { backgroundColor: colors.accent }]} />
+            ) : null;
             return (
               <Pressable
                 style={[s.card, { flexDirection: "row", alignItems: "center" }]}
-                onPress={() => onOpen(it.id, it.directory)}
+                onPress={() => {
+                  setJustDone((prev) => (prev.has(it.id) ? new Set([...prev].filter((x) => x !== it.id)) : prev));
+                  onOpen(it.id, it.directory);
+                }}
               >
+                {status}
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.s }}>
                     <Text style={[s.cardTitle, { flex: 1 }]} numberOfLines={1}>
-                      {isFav ? "★ " : ""}{it.active ? "🟢 " : ""}
-                      {it.title}
+                      {isFav ? "★ " : ""}
+                      {titles?.[it.id] ?? it.title}
                     </Text>
                     <Text style={s.timeTxt}>{timeLabel(it.timeCreated)}</Text>
                   </View>
@@ -318,6 +375,31 @@ const s = StyleSheet.create({
     justifyContent: "center",
   },
   iconBtnText: { color: colors.text, fontSize: fontSize.xl },
+  searchWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginHorizontal: spacing.l,
+    marginBottom: spacing.m,
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: spacing.m,
+    gap: spacing.s,
+  },
+  searchIcon: { fontSize: fontSize.s },
+  searchInput: {
+    flex: 1,
+    color: colors.text,
+    fontSize: fontSize.m,
+    paddingVertical: 10,
+  },
+  statusDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginRight: spacing.s,
+  },
   card: {
     backgroundColor: colors.surface,
     borderColor: colors.border,
