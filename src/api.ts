@@ -156,6 +156,26 @@ export function parseMessage(raw: any): RenderMessage | null {
       parts.push({ kind: "text", text: m.text });
     }
   }
+  // v2: файлы сообщения лежат в m.files, в тексте на их месте — плейсхолдеры "[Image N]"
+  const filesRaw: any[] = Array.isArray(m?.files) ? m.files : [];
+  if (filesRaw.length > 0) {
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const pp = parts[i];
+      if (pp.kind === "text") {
+        const cleaned = pp.text.replace(/\[Image \d+\]\s*/g, "").trim();
+        if (cleaned) parts[i] = { kind: "text", text: cleaned };
+        else parts.splice(i, 1);
+      }
+    }
+    for (const f of filesRaw) {
+      const name = String(f?.name ?? f?.filename ?? "файл");
+      const mime = String(f?.mime ?? f?.mediaType ?? "application/octet-stream");
+      const url =
+        typeof f?.url === "string" ? f.url : typeof f?.source?.uri === "string" ? f.source.uri : undefined;
+      const data = typeof f?.data === "string" ? f.data : undefined;
+      if (url || data) parts.push({ kind: "file", label: name, mime, url, data });
+    }
+  }
   if (parts.length === 0) return null;
   const t = m?.time?.created ?? m?.time?.start;
   return { id: m?.id ? String(m.id) : undefined, role: type, parts, time: typeof t === "number" ? t : undefined };
@@ -384,8 +404,26 @@ class OpenCodeApi {
 
   /** откатить чат до сообщения messageID (всё после него убирается из контекста) */
   async revert(sessionID: string, messageID: string): Promise<void> {
-    const path = this.omni ? `/session/${sessionID}/revert` : `/api/session/${sessionID}/revert`;
-    await this.req(path, { method: "POST", json: { messageID } });
+    // форк: один эндпоинт; v2: две ступени — stage, потом commit
+    if (this.omni) {
+      await this.req(`/session/${sessionID}/revert`, { method: "POST", json: { messageID } });
+      return;
+    }
+    const stage = () =>
+      this.req(`/api/session/${sessionID}/revert/stage`, { method: "POST", json: { messageID } });
+    try {
+      await stage();
+    } catch (e: any) {
+      // сессия занята агентом — останавливаем и повторяем один раз
+      if (e instanceof ApiError && e.status === 409) {
+        await this.abort(sessionID);
+        await new Promise((r) => setTimeout(r, 1000));
+        await stage();
+      } else {
+        throw e;
+      }
+    }
+    await this.req(`/api/session/${sessionID}/revert/commit`, { method: "POST", json: {} });
   }
 
   /** отменить сделанный откат (кнопка «Вернуть») */

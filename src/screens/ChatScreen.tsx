@@ -371,29 +371,32 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   const send = async () => {
     const text = input.trim();
     if ((!text && attachments.length === 0) || sending) return;
+    const sentFiles = attachments; // захват для восстановления при ошибке
     setInput("");
     setError(null);
+    setSending(true); // сразу блокируем повторную отправку (и во время загрузки файла)
     // мгновенно показать своё сообщение (не ждём сервер)
     const shown: RenderPart[] = [];
     if (text) shown.push({ kind: "text", text });
-    for (const a of attachments) shown.push({ kind: "file", label: a.filename, mime: a.mime, url: a.uri });
+    for (const a of sentFiles) shown.push({ kind: "file", label: a.filename, mime: a.mime, url: a.uri });
     setBubbles((prev) => [...prev, { key: `local-${Date.now()}`, role: "user", parts: shown }]);
+    // чип убирается сразу — фото уже в чате, а не «лежит на следующее сообщение»
+    setAttachments([]);
     const files: PromptFile[] = [];
-    for (const a of attachments) {
-      // сервер на ноуте не видит file:// телефона — сначала заливаем файл
-      const remote = await api.uploadFile(a.uri, a.filename, a.mime);
-      files.push({ url: `file:///${remote}`, mime: a.mime, filename: a.filename });
-    }
-    setSending(true);
     try {
+      for (const a of sentFiles) {
+        // сервер на ноуте не видит file:// телефона — сначала заливаем файл
+        const remote = await api.uploadFile(a.uri, a.filename, a.mime);
+        files.push({ url: `file:///${remote}`, mime: a.mime, filename: a.filename });
+      }
       // если агент чем-то занят — встанет в очередь (OpenCode delivery)
       await api.prompt(sessionID, text, busyRef.current ? "queue" : undefined, files.length > 0 ? files : undefined);
-      setAttachments([]);
       await pollState();
       loadMessages();
     } catch (e: any) {
       setError(e?.message ?? String(e));
       setInput(text); // вернуть текст, чтобы не потерять
+      if (sentFiles.length > 0) setAttachments(sentFiles); // вернуть фото — отправить заново
     } finally {
       setSending(false);
     }
