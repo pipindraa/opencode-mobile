@@ -153,6 +153,25 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [previewErr, setPreviewErr] = useState<string | null>(null);
   const [previewSize, setPreviewSize] = useState<{ w: number; h: number } | null>(null);
+  // — «вниз»-кнопка: показывается, когда пролистали вверх от последних сообщений —
+  const listRef = useRef<any>(null);
+  const [away, setAway] = useState(false);
+  const awayRef = useRef(false);
+  const onListScroll = useCallback((e: any) => {
+    // inverted-список: у «дна» (последние сообщения) contentOffset.y ≈ 0,
+    // при пролистывании вверх |y| растёт (знак зависит от платформы)
+    const isAway = Math.abs(e?.nativeEvent?.contentOffset?.y ?? 0) > 120;
+    if (isAway !== awayRef.current) {
+      awayRef.current = isAway;
+      setAway(isAway);
+    }
+  }, []);
+  const scrollToBottom = useCallback(() => {
+    // inverted-список: «дно» (последние сообщения) — это offset 0.
+    // scrollToEnd() тут ненадёжен (конец диапазона ≠ визуальный низ),
+    // а offset 0 верен в обеих системах знаков.
+    listRef.current?.scrollToOffset({ offset: 0, animated: true });
+  }, []);
 
   const modelKey = (m: ModelRow) => `${m.providerID}/${m.id}`;
 
@@ -1036,11 +1055,14 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       )}
 
       <FlatList
+        ref={listRef}
         data={reversed}
         inverted
         keyExtractor={(item) => item.key}
         contentContainerStyle={{ paddingTop: spacing.l, paddingBottom: spacing.s }}
         ItemSeparatorComponent={() => <View style={{ height: spacing.s }} />}
+        onScroll={onListScroll}
+        scrollEventThrottle={100}
         renderItem={({ item }) => {
           const isUser = item.role === "user";
           const isStreamBubble = item.key.startsWith("stream-");
@@ -1329,6 +1351,15 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
           <Text style={s.selBarText} numberOfLines={1}>
             {voicePhase === "processing" ? "Готовлю текст…" : "🎤 " + (dictation || "Слушаю — говори…")}
           </Text>
+        </View>
+      )}
+
+      {/* «вниз» — когда пролистали вверх от последних сообщений */}
+      {away && (
+        <View style={{ alignItems: "flex-end", paddingHorizontal: spacing.l, paddingBottom: spacing.xs }}>
+          <Pressable style={s.bottomBtn} onPress={scrollToBottom} hitSlop={6}>
+            <Text style={{ color: colors.text, fontSize: fontSize.l, fontWeight: "700" }}>↓</Text>
+          </Pressable>
         </View>
       )}
 
@@ -1752,6 +1783,21 @@ const s = StyleSheet.create({
   copiedBar: {
     alignItems: "center",
     paddingVertical: 2,
+  },
+  bottomBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.surface2,
+    borderColor: colors.border,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
   },
   attachBtn: { paddingHorizontal: spacing.s, paddingBottom: 8 },
   attachRow: { maxHeight: 76, paddingHorizontal: spacing.l, paddingBottom: spacing.s },
