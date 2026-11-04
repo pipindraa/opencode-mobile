@@ -414,5 +414,7 @@ logcat-проверки.
 - [x] versionName 1.6.6 / versionCode 10606 / app.json 1.6.6
 - [x] Сборка 10606 (gradlew assembleRelease, 5м12с, бандл свежий — 811 модулей)
   → APK: versionCode=10606 versionName=1.6.6 (aapt); releases/app-release-1.6.6.apk
-- [ ] Релиз v1.6.6 на GitHub + APK; владелец ставит через «Проверить обновления»
+- [x] Релиз v1.6.6 на GitHub + APK (app-release-1.6.6.apk, Latest);
+  коммит 95bbbdd в origin/master
+- [ ] Владелец: ставит 1.6.6 через «Проверить обновления», смотрит UI
 
