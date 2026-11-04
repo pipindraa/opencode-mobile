@@ -29,6 +29,7 @@ import { OpenCodeApi, RenderMessage, RenderPart, Decision, ServerKind, PromptFil
 import { subscribeSession, BusEvent, PermissionRequest } from "../events";
 import { AsyncStorage } from "../store";
 import { colors, spacing, fontSize } from "../theme";
+import { Ionicons } from "@expo/vector-icons";
 
 interface Props {
   api: OpenCodeApi;
@@ -55,6 +56,22 @@ interface PermCard {
 }
 
 const POLL_MS = 1600;
+
+/** имя глифа Ionicons (для иконок, приходящих из данных: RenderPart.icon) */
+type IconName = React.ComponentProps<typeof Ionicons>["name"];
+
+/**
+ * Формат activity-лейбла: "tool:label" / "typing:печатает ответ" /
+ * "think:думает" / "perm:…". Вид определяет иконку в статус-баре;
+ * сам текст показываем без эмодзи-префиксов.
+ */
+function parseActivity(a: string): { kind: "tool" | "typing" | "think" | "perm"; text: string } {
+  if (a.startsWith("tool:")) return { kind: "tool", text: a.slice(5) };
+  if (a.startsWith("typing:")) return { kind: "typing", text: a.slice(7) };
+  if (a.startsWith("think:")) return { kind: "think", text: a.slice(6) };
+  if (a.startsWith("perm:")) return { kind: "perm", text: a.slice(5) };
+  return { kind: "think", text: a };
+}
 
 /** Код ошибки распознавателя → человекочитаемо (по SpeechRecognizer.ERROR_*) */
 function voiceErrorText(e: string): string {
@@ -146,7 +163,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   /** живой стрим ответа: что прилетело по SSE, но ещё не в снимке сервера. key — messageID */
   const [stream, setStream] = useState<{ [messageID: string]: StreamMsg }>({});
   const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // — голосовой ввод: тап 🎤 → дикт → вставляется в поле, без авто-отправки —
+  // — голосовой ввод: тап по микрофону → дикт → вставляется в поле, без авто-отправки —
   const [voiceOn, setVoiceOn] = useState(false);
   const [dictation, setDictation] = useState("");
   /** listening — ждём речь; processing — пользователь нажал стоп, готовим текст */
@@ -280,9 +297,9 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       arr.push(m);
       byProvider.set(m.providerID, arr);
     }
-    const rows: ({ kind: "hdr"; label: string } | { kind: "mdl"; m: ModelRow })[] = [];
+    const rows: ({ kind: "hdr"; label: string; fav?: boolean } | { kind: "mdl"; m: ModelRow })[] = [];
     if (favMore.length > 0) {
-      rows.push({ kind: "hdr", label: "★ Избранное" });
+      rows.push({ kind: "hdr", label: "Избранное", fav: true });
       for (const m of favMore) rows.push({ kind: "mdl", m });
     }
     const provs = [...byProvider.keys()].sort((a, b) => a.localeCompare(b));
@@ -357,9 +374,9 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       if (last && last.role === "assistant") {
         const running = last.parts.find((p: any) => p.kind === "tool" && p.state === "running");
         const hasText = last.parts.some((p: any) => p.kind === "text" && p.text.trim().length > 0);
-        if (running) setActivity(`⚙ ${(running as any).label}`);
-        else if (hasText) setActivity("✍️ печатает ответ");
-        else setActivity("🧠 думает");
+        if (running) setActivity(`tool:${(running as any).label}`);
+        else if (hasText) setActivity("typing:печатает ответ");
+        else setActivity("think:думает");
       } else {
         setActivity("");
       }
@@ -457,7 +474,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
               [e.messageID]: { ...cur, texts: { ...cur.texts, [ord]: (cur.texts[ord] ?? "") + e.delta } },
             };
           });
-          setActivity("✍️ печатает ответ");
+          setActivity("typing:печатает ответ");
           break;
         }
         case "text-ended":
@@ -483,7 +500,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
               [e.messageID]: { ...cur, tools: { ...cur.tools, [e.id]: { ...ex, state: e.state } } },
             };
           });
-          if (e.state === "running") setActivity(`⚙ ${guessTool(e.input)}`);
+          if (e.state === "running") setActivity(`tool:${guessTool(e.input)}`);
           break;
         }
         case "permission": {
@@ -683,7 +700,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   };
 
   /**
-   * Меню сообщения — кнопка «⋯» рядом с пузырём. Долгое нажатие на сам текст —
+   * Меню сообщения — кнопка «…» рядом с пузырём. Долгое нажатие на сам текст —
    * нативное выделение Android (selectable): зажал на слове → ручки → копировать.
    */
   const [menuBubble, setMenuBubble] = useState<ChatBubble | null>(null);
@@ -717,7 +734,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   };
 
   // ————————————————— голосовой ввод (непрерывный) —————————————————
-  // тап 🎤 → диктуем → текст копится и вставляется в поле (без авто-отправки).
+  // тап по микрофону → диктуем → текст копится и вставляется в поле (без авто-отправки).
   // Паузы НЕ убивают диктовку: нативная сессия кончается на тише 3с
   // (voice.ts), JS добирает её результат, добавляет в накопленное и
   // перезапускает сессию. Текст в поле — на ~6с после последнего слова,
@@ -1030,7 +1047,15 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   const title = sessionTitle || directory.replace(/\\/g, "/").split("/").filter(Boolean).pop() || "сессия";
   /** сколько секунд уже работает агент — для плашки «работает 12с» */
   const busySec = busy && busySince ? Math.max(1, Math.round((Date.now() - busySince) / 1000)) : 0;
-  const statusText = perms.length > 0 ? "✋ ждёт твоего разрешения" : activity || "🧠 думает";
+  const statusText = perms.length > 0 ? "perm:ждёт твоего разрешения" : activity || "think:думает";
+  /** вид статуса → иконка: инструмент / печатает / думает / разрешение / отправляю */
+  const statusInfo = (() => {
+    if (sending && !busy) return { icon: "paper-plane-outline" as const, color: colors.accent, text: "отправляю сообщение" };
+    const a = parseActivity(statusText);
+    const icon: IconName =
+      a.kind === "tool" ? "construct-outline" : a.kind === "typing" ? "create-outline" : a.kind === "perm" ? "alert-circle-outline" : "bulb-outline";
+    return { icon, color: a.kind === "perm" ? colors.warn : colors.accent, text: a.text };
+  })();
 
   // пузыри стрима: хвост печатающегося ответа — в чате до того, как дошёл снимок сервера
   const streamBubbles = useMemo(() => {
@@ -1064,7 +1089,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   const modelLabel = `${modelName}${variantLabel}`;
   const agentLabel = String(info?.agent ?? "");
   const t = info?.tokens ?? {};
-  const tokLabel = `↑${fmtTok(t.input)} ↓${fmtTok(t.output)} $${fmtCost(info?.cost)}`;
+  const tokLabel = `${fmtTok(t.input)} в · ${fmtTok(t.output)} из · $${fmtCost(info?.cost)}`;
 
   return (
     <Animated.View
@@ -1072,55 +1097,86 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       {...swipe.panHandlers}
     >
       <View style={s.header}>
-        <Pressable style={s.back} onPress={onBack}>
-          <Text style={{ color: colors.accent, fontSize: fontSize.l }}>‹ Назад</Text>
+        <Pressable style={s.back} onPress={onBack} hitSlop={12}>
+          <View style={s.backRow}>
+            <Ionicons name="chevron-back" size={20} color={colors.accent} />
+            <Text style={{ color: colors.accent, fontSize: fontSize.l }}>Назад</Text>
+          </View>
         </Pressable>
         <Text style={s.title} numberOfLines={1}>
           {title}
         </Text>
         {busy && (
           <Pressable style={s.stopBtn} onPress={stop}>
-            <Text style={{ color: "#fff", fontWeight: "700" }}>■ Стоп</Text>
+            <View style={s.stopRow}>
+              <Ionicons name="stop" size={14} color="#fff" />
+              <Text style={{ color: "#fff", fontWeight: "700" }}>Стоп</Text>
+            </View>
           </Pressable>
         )}
       </View>
 
-      {error && <Text style={s.err}>⚠ {error}</Text>}
+      {error && (
+        <View style={s.errRow}>
+          <Ionicons name="alert-circle-outline" size={15} color={colors.danger} />
+          <Text style={s.err}>{error}</Text>
+        </View>
+      )}
 
       {/* инфо-строка: модель / агент / статистика / файлы */}
       <View style={s.infoRow}>
         <Pressable style={s.chip} onPress={() => { loadModels(); setSheet("model"); }}>
-          <Text style={s.chipText} numberOfLines={1}>🤖 {modelLabel} ▾</Text>
+          <View style={s.chipRow}>
+            <Ionicons name="hardware-chip-outline" size={14} color={colors.textDim} />
+            <Text style={s.chipText} numberOfLines={1}>{modelLabel}</Text>
+            <Ionicons name="chevron-down" size={12} color={colors.textDim} />
+          </View>
         </Pressable>
         <Pressable style={s.chip} onPress={() => { loadAgents(); setSheet("agent"); }}>
-          <Text style={s.chipText} numberOfLines={1}>🧩 {agentLabel} ▾</Text>
+          <View style={s.chipRow}>
+            <Ionicons name="person-circle-outline" size={14} color={colors.textDim} />
+            <Text style={s.chipText} numberOfLines={1}>{agentLabel}</Text>
+            <Ionicons name="chevron-down" size={12} color={colors.textDim} />
+          </View>
         </Pressable>
         {serverKind === "opencode" && (
           <Pressable style={s.chip} onPress={openFiles}>
-            <Text style={s.chipText} numberOfLines={1}>📁 Файлы</Text>
+            <View style={s.chipRow}>
+              <Ionicons name="folder-outline" size={14} color={colors.textDim} />
+              <Text style={s.chipText} numberOfLines={1}>Файлы</Text>
+            </View>
           </Pressable>
         )}
         <Pressable style={[s.chip, { marginLeft: "auto" }]} onPress={() => { loadContext(); setSheet("ctx"); }}>
-          <Text style={s.chipText} numberOfLines={1}>📊 {tokLabel}</Text>
+          <View style={s.chipRow}>
+            <Ionicons name="stats-chart-outline" size={14} color={colors.textDim} />
+            <Text style={s.chipText} numberOfLines={1}>{tokLabel}</Text>
+          </View>
         </Pressable>
       </View>
 
       {/* что делает агент: видно всегда, без «непонятного ожидания» */}
       {(busy || sending) && (
         <View style={s.statusBar}>
-          <ActivityIndicator size="small" color={colors.accent} />
+          <Ionicons name={statusInfo.icon} size={15} color={statusInfo.color} />
           <Text style={s.statusText} numberOfLines={1}>
-            {sending && !busy ? "📤 отправляю сообщение" : statusText}{dots} {busySec > 0 ? ` · ${busySec}с` : ""}
+            {statusInfo.text}{dots}{busySec > 0 ? ` · ${busySec}с` : ""}
           </Text>
           <Pressable style={s.stopSmall} onPress={stop}>
-            <Text style={{ color: "#fff", fontSize: fontSize.s, fontWeight: "700" }}>Стоп</Text>
+            <View style={s.stopRow}>
+              <Ionicons name="stop" size={12} color="#fff" />
+              <Text style={{ color: "#fff", fontSize: fontSize.s, fontWeight: "700" }}>Стоп</Text>
+            </View>
           </Pressable>
         </View>
       )}
 
       {copied && (
         <View style={s.copiedBar}>
-          <Text style={{ color: "#0a2", fontWeight: "700" }}>✓ Скопировано</Text>
+          <View style={s.copiedRow}>
+            <Ionicons name="checkmark-circle" size={14} color={colors.ok} />
+            <Text style={{ color: colors.ok, fontWeight: "700" }}>Скопировано</Text>
+          </View>
         </View>
       )}
 
@@ -1197,26 +1253,38 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                         );
                       }
                     } else if (p.kind === "tool") {
+                      const ti =
+                        p.state === "running"
+                          ? { n: "construct-outline" as const, c: colors.accent }
+                          : p.state === "completed"
+                          ? { n: "checkmark" as const, c: colors.ok }
+                          : p.state === "error"
+                          ? { n: "close" as const, c: colors.danger }
+                          : { n: "ellipsis-horizontal-outline" as const, c: colors.textDim };
                       nodes.push(
                         <View key={i} style={s.toolLine}>
-                          <Text style={s.toolText}>
-                            {p.state === "running" ? "⚙ " : p.state === "completed" ? "✓ " : p.state === "error" ? "✗ " : "• "}
-                            {p.label}
-                            {p.state === "running" ? " …" : ""}
-                          </Text>
+                          <View style={s.toolLineRow}>
+                            <Ionicons name={ti.n} size={13} color={ti.c} />
+                            <Text style={s.toolText}>
+                              {p.label}
+                              {p.state === "running" ? " …" : ""}
+                            </Text>
+                          </View>
                         </View>
                       );
                     } else if (p.kind === "file") {
                       nodes.push(
-                        <Text key={i} style={s.toolText}>
-                          📎 {p.label}
-                        </Text>
+                        <View key={i} style={s.toolLineRow}>
+                          <Ionicons name="attach-outline" size={13} color={colors.textDim} />
+                          <Text style={s.toolText}>{p.label}</Text>
+                        </View>
                       );
                     } else {
                       nodes.push(
-                        <Text key={i} style={s.toolText}>
-                          {p.label}
-                        </Text>
+                        <View key={i} style={s.toolLineRow}>
+                          {p.icon ? <Ionicons name={p.icon as IconName} size={13} color={colors.textDim} /> : null}
+                          <Text style={s.toolText}>{p.label}</Text>
+                        </View>
                       );
                     }
                   });
@@ -1239,9 +1307,10 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         <View style={s.permWrap}>
           {perms.map((p) => (
             <View key={p.requestID} style={s.permCard}>
-              <Text style={{ color: colors.warn, fontWeight: "700", marginBottom: spacing.s }}>
-                ✋ Нужно разрешение: {p.label}
-              </Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: spacing.s }}>
+                <Ionicons name="alert-circle-outline" size={15} color={colors.warn} />
+                <Text style={{ color: colors.warn, fontWeight: "700" }}>Нужно разрешение: {p.label}</Text>
+              </View>
               <View style={s.permRow}>
                 <Pressable style={[s.permBtn, { backgroundColor: colors.ok }]} onPress={() => decide(p.requestID, "once")}>
                   <Text style={s.permBtnText}>Разрешить</Text>
@@ -1280,7 +1349,14 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                   ItemSeparatorComponent={() => <View style={{ height: spacing.xs }} />}
                   renderItem={({ item }) => {
                     if (item.kind === "hdr") {
-                      return <Text style={s.secHdr}>{item.label}</Text>;
+                      return item.fav ? (
+                        <View style={s.secHdrRow}>
+                          <Ionicons name="star" size={12} color="#f5b73e" />
+                          <Text style={s.secHdr}>{item.label}</Text>
+                        </View>
+                      ) : (
+                        <Text style={s.secHdr}>{item.label}</Text>
+                      );
                     }
                     const m = item.m;
                     const k = modelKey(m);
@@ -1292,19 +1368,26 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                       <View>
                         <View style={[s.card, { flexDirection: "row", alignItems: "center", marginHorizontal: 0, paddingVertical: spacing.s }, activeRow && { borderColor: colors.accent }]}>
                           <Pressable style={{ flex: 1 }} onPress={() => pressModelRow(m)}>
-                            <Text style={s.cardTitle} numberOfLines={1}>
-                              {activeRow ? (activeVariant ? "✓⏳ " : "✓ ") : expanded && m.variants.length > 0 ? "▾ " : m.variants.length > 0 ? "▸ " : ""}
-                              {m.name}
-                            </Text>
+                            <View style={s.cardTitleRow}>
+                              {activeRow && <Ionicons name="checkmark" size={15} color={colors.ok} />}
+                              {!activeRow && m.variants.length > 0 && (
+                                <Ionicons name={expanded ? "chevron-down" : "chevron-forward"} size={14} color={colors.textDim} />
+                              )}
+                              <Text style={s.cardTitle} numberOfLines={1}>
+                                {m.name}
+                              </Text>
+                            </View>
                             <Text style={s.cardDir} numberOfLines={1}>
                               {m.providerID}
-                              {m.variants.length > 0 ? " · режимы: " + m.variants.join(", ") : ""}
+                              {activeVariant
+                                ? ` · режим: ${String(cur?.variant)}`
+                                : m.variants.length > 0
+                                ? " · режимы: " + m.variants.join(", ")
+                                : ""}
                             </Text>
                           </Pressable>
                           <Pressable hitSlop={6} style={{ paddingHorizontal: spacing.m }} onPress={() => toggleFav(m)}>
-                            <Text style={{ color: isFav ? "#f5b73e" : colors.textDim, fontSize: fontSize.xl }}>
-                              {isFav ? "★" : "☆"}
-                            </Text>
+                            <Ionicons name={isFav ? "star" : "star-outline"} size={20} color={isFav ? "#f5b73e" : colors.textDim} />
                           </Pressable>
                         </View>
                         {expanded && m.variants.length > 0 && (
@@ -1324,7 +1407,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                   }}
                   ListEmptyComponent={<Text style={s.empty}>Ничего не нашлось</Text>}
                 />
-                <Text style={s.hint}>Тапай ☆ чтобы добавить модель в избранное, ▸ раскрывает режимы reasoning.</Text>
+                <Text style={s.hint}>Звезда — добавить модель в избранное, стрелка — раскрыть режимы reasoning.</Text>
               </>
             )}
             {sheet === "agent" && (
@@ -1342,7 +1425,10 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                         style={[s.card, { marginHorizontal: 0, paddingVertical: spacing.s }, activeRow && { borderColor: colors.accent }]}
                         onPress={() => applyAgent(item.id)}
                       >
-                        <Text style={s.cardTitle}>{activeRow ? "✓ " : ""}{item.name}</Text>
+                        <View style={s.cardTitleRow}>
+                          {activeRow && <Ionicons name="checkmark" size={15} color={colors.ok} />}
+                          <Text style={s.cardTitle}>{item.name}</Text>
+                        </View>
                         <Text style={s.cardDir}>{item.id}</Text>
                       </Pressable>
                     );
@@ -1355,11 +1441,17 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
               <>
                 <Text style={s.sheetTitle}>Контекст сессии</Text>
                 <View style={[s.card, { marginHorizontal: 0 }]}>
-                  <Text style={s.cardTitle}>📊 Токены</Text>
+                  <View style={s.cardTitleRow}>
+                    <Ionicons name="stats-chart-outline" size={15} color={colors.textDim} />
+                    <Text style={s.cardTitle}>Токены</Text>
+                  </View>
                   <Text style={s.cardDir}>
-                    ↑ вход {fmtTok(t.input)} · ↓ выход {fmtTok(t.output)} · 💭 {fmtTok(t.reasoning)} · кэш {fmtTok(t.cache?.read)}
+                    вход {fmtTok(t.input)} · выход {fmtTok(t.output)} · размышление {fmtTok(t.reasoning)} · кэш {fmtTok(t.cache?.read)}
                   </Text>
-                  <Text style={[s.cardTitle, { marginTop: spacing.m }]}>💵 Стоимость</Text>
+                  <View style={[s.cardTitleRow, { marginTop: spacing.m }]}>
+                    <Ionicons name="cash-outline" size={15} color={colors.textDim} />
+                    <Text style={s.cardTitle}>Стоимость</Text>
+                  </View>
                   <Text style={s.cardDir}>${fmtCost(info?.cost)} за сессию</Text>
                   <Text style={[s.cardDir, { marginTop: spacing.s }]}>
                     {ctxCount == null ? "Собираю…" : `В контексте сейчас ~${ctxCount} записей.`}
@@ -1367,15 +1459,26 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                 </View>
                 {serverKind !== "omnirush" && (
                   <Pressable style={[s.btn, { marginTop: spacing.m }]} onPress={doCompact}>
-                    <Text style={s.btnText}>🗜 Сжать контекст</Text>
+                    <View style={s.btnRow}>
+                      <Ionicons name="contract-outline" size={16} color="#fff" />
+                      <Text style={s.btnText}>Сжать контекст</Text>
+                    </View>
                   </Pressable>
                 )}
               </>
             )}
             {sheet === "files" && (
               <>
-                <Text style={s.sheetTitle}>📁 Файлы сессии</Text>
-                {fileErr && <Text style={s.err}>{fileErr}</Text>}
+                <View style={s.sheetTitleRow}>
+                  <Ionicons name="folder-outline" size={18} color={colors.text} />
+                  <Text style={s.sheetTitle}>Файлы сессии</Text>
+                </View>
+                {fileErr && (
+                  <View style={s.errRow}>
+                    <Ionicons name="alert-circle-outline" size={15} color={colors.danger} />
+                    <Text style={s.err}>{fileErr}</Text>
+                  </View>
+                )}
                 <FlatList
                   data={files ?? []}
                   keyExtractor={(f) => f.path}
@@ -1387,23 +1490,29 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                   renderItem={({ item }) => (
                     <View style={[s.card, { marginHorizontal: 0, flexDirection: "row", alignItems: "center" }]}>
                       <Pressable style={{ flex: 1 }} onPress={() => onFileTap(item)} disabled={fileBusy != null}>
-                        <Text style={s.cardTitle} numberOfLines={1}>
-                          {fileBusy === item.path ? "⏳ " : IMG_RE.test(item.path) ? "🖼 " : "📄 "}
-                          {item.path.split(/[\\/]/).pop()}
-                        </Text>
+                        <View style={s.fileRow}>
+                          <Ionicons
+                            name={fileBusy === item.path ? "time-outline" : IMG_RE.test(item.path) ? "image-outline" : "document-outline"}
+                            size={15}
+                            color={fileBusy === item.path ? colors.warn : colors.textDim}
+                          />
+                          <Text style={s.cardTitle} numberOfLines={1}>
+                            {item.path.split(/[\\/]/).pop()}
+                          </Text>
+                        </View>
                         <Text style={s.cardDir} numberOfLines={1}>
                           {item.path}
                         </Text>
                       </Pressable>
                       <Pressable hitSlop={8} style={{ paddingLeft: spacing.m }} onPress={() => copyPath(item.path)}>
-                        <Text style={{ color: colors.textDim, fontSize: fontSize.l }}>⧉</Text>
+                        <Ionicons name="copy-outline" size={18} color={colors.textDim} />
                       </Pressable>
                     </View>
                   )}
                 />
                 <Text style={s.hint}>
                   Картинка — тапай для превью, остальное — скачать (chooser «поделиться»). Сервер отдаёт файлы
-                  только из C:\Users\kiril: файлы на D: не скачаются — копируй путь ⧉.
+                  только из C:\Users\kiril: файлы на D: не скачаются — копируй путь (иконка справа).
                 </Text>
               </>
             )}
@@ -1418,9 +1527,12 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       {voiceOn && (
         <View style={s.selBar}>
           <ActivityIndicator size="small" color={colors.accent} style={{ marginRight: spacing.s }} />
-          <Text style={s.selBarText} numberOfLines={1}>
-            {voicePhase === "processing" ? "Готовлю текст…" : "🎤 " + (dictation || "Слушаю — говори…")}
-          </Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flex: 1 }}>
+            <Ionicons name="mic" size={14} color={colors.accent} />
+            <Text style={s.selBarText} numberOfLines={1}>
+              {voicePhase === "processing" ? "Готовлю текст…" : dictation || "Слушаю — говори…"}
+            </Text>
+          </View>
         </View>
       )}
 
@@ -1428,14 +1540,14 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       {away && (
         <View style={{ alignItems: "flex-end", paddingHorizontal: spacing.l, paddingBottom: spacing.xs }}>
           <Pressable style={s.bottomBtn} onPress={scrollToBottom} hitSlop={6}>
-            <Text style={{ color: colors.text, fontSize: fontSize.l, fontWeight: "700" }}>↓</Text>
+            <Ionicons name="arrow-down" size={22} color={colors.text} />
           </Pressable>
         </View>
       )}
 
       <View style={s.inputRow}>
         <Pressable style={s.attachBtn} onPress={() => setAttachMenu(true)}>
-          <Text style={{ color: colors.textDim, fontSize: fontSize.xl }}>📎</Text>
+          <Ionicons name="attach-outline" size={22} color={colors.textDim} />
         </Pressable>
         <TextInput
           style={s.input}
@@ -1466,11 +1578,11 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
           {sending ? (
             <ActivityIndicator color="#fff" size="small" />
           ) : voiceOn ? (
-            <Text style={{ color: "#fff", fontSize: fontSize.l, fontWeight: "700" }}>⏹</Text>
+            <Ionicons name="stop" size={20} color="#fff" />
           ) : input.trim().length > 0 || attachments.length > 0 ? (
-            <Text style={s.sendText}>▶</Text>
+            <Ionicons name="arrow-forward" size={22} color="#fff" />
           ) : (
-            <Text style={{ fontSize: fontSize.xl }}>🎤</Text>
+            <Ionicons name="mic" size={24} color="#fff" />
           )}
         </Pressable>
       </View>
@@ -1485,7 +1597,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                 hitSlop={8}
                 onPress={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
               >
-                <Text style={{ color: "#fff", fontSize: fontSize.s, fontWeight: "700" }}>✕</Text>
+                <Ionicons name="close" size={12} color="#fff" />
               </Pressable>
             </View>
           ))}
@@ -1503,8 +1615,13 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                 pickImage(false);
               }}
             >
-              <Text style={s.cardTitle}>🖼 Галерея</Text>
-              <Text style={s.cardDir}>Выбрать фото или скриншот</Text>
+              <View style={s.attachMenuRow}>
+                <Ionicons name="images-outline" size={20} color={colors.accent} />
+                <View style={{ flex: 1 }}>
+                  <Text style={s.cardTitle}>Галерея</Text>
+                  <Text style={s.cardDir}>Выбрать фото или скриншот</Text>
+                </View>
+              </View>
             </Pressable>
             <Pressable
               style={[s.card, { marginHorizontal: 0, marginTop: spacing.s }]}
@@ -1513,8 +1630,13 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                 pickImage(true);
               }}
             >
-              <Text style={s.cardTitle}>📷 Камера</Text>
-              <Text style={s.cardDir}>Сфотографировать прямо сейчас</Text>
+              <View style={s.attachMenuRow}>
+                <Ionicons name="camera-outline" size={20} color={colors.accent} />
+                <View style={{ flex: 1 }}>
+                  <Text style={s.cardTitle}>Камера</Text>
+                  <Text style={s.cardDir}>Сфотографировать прямо сейчас</Text>
+                </View>
+              </View>
             </Pressable>
             <Pressable style={[s.btn, s.btnGhost]} onPress={() => setAttachMenu(false)}>
               <Text style={[s.btnText, { color: colors.text }]}>Отмена</Text>
@@ -1523,14 +1645,17 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </Pressable>
       </Modal>
 
-      {/* меню сообщения: «⋯» рядом с пузырём (выделение текста — нативное, зажатием) */}
+      {/* меню сообщения: «…» рядом с пузырём (выделение текста — нативное, зажатием) */}
       <Modal visible={menuBubble !== null} transparent animationType="fade" onRequestClose={closeMenu}>
         <Pressable style={s.overlay} onPress={closeMenu}>
           <View style={s.modal}>
             <Text style={s.sheetTitle}>{menuBubble?.role === "user" ? "Твоё сообщение" : "Ответ агента"}</Text>
             {menuBubble && hasText(menuBubble) ? (
               <Pressable style={s.menuRow} onPress={() => { copyBubble(menuBubble); closeMenu(); }}>
-                <Text style={s.menuRowText}>📋 Копировать всё</Text>
+                <View style={s.menuRowIcon}>
+                  <Ionicons name="copy-outline" size={17} color={colors.text} />
+                  <Text style={s.menuRowText}>Копировать всё</Text>
+                </View>
               </Pressable>
             ) : null}
             {menuBubble?.id ? (
@@ -1542,7 +1667,10 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                   doRevert(b);
                 }}
               >
-                <Text style={[s.menuRowText, { color: colors.danger }]}>⟲ Откатить с этого</Text>
+                <View style={s.menuRowIcon}>
+                  <Ionicons name="arrow-undo-outline" size={17} color={colors.danger} />
+                  <Text style={[s.menuRowText, { color: colors.danger }]}>Откатить с этого</Text>
+                </View>
               </Pressable>
             ) : null}
             <Pressable style={[s.btn, s.btnGhost]} onPress={closeMenu}>
@@ -1712,7 +1840,7 @@ function renderMdBlocks(text: string, isUser: boolean, keyBase: string): React.R
   return nodes;
 }
 
-/** «⋯» рядом с пузырём: меню сообщения (копировать всё / откатить).
+/** «…» рядом с пузырём: меню сообщения (копировать всё / откатить).
  *  Долгое нажатие на текст — нативное выделение, оно не уходит сюда. */
 function BubbleMenuBtn({ onOpen }: { onOpen: () => void }) {
   return (
@@ -1730,7 +1858,7 @@ function BubbleMenuBtn({ onOpen }: { onOpen: () => void }) {
         justifyContent: "center",
       }}
     >
-      <Text style={{ color: colors.textDim, fontSize: fontSize.m, fontWeight: "700", lineHeight: 14 }}>⋯</Text>
+      <Ionicons name="ellipsis-horizontal" size={16} color={colors.textDim} />
     </Pressable>
   );
 }
@@ -1980,6 +2108,7 @@ const s = StyleSheet.create({
     marginTop: spacing.s,
     marginBottom: spacing.xs,
   },
+  secHdrRow: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: spacing.s, marginBottom: spacing.xs },
   card: {
     backgroundColor: colors.surface,
     borderColor: colors.border,
@@ -2026,11 +2155,27 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  sendText: { color: "#fff", fontSize: fontSize.xl },
   err: {
     color: colors.danger,
     fontSize: fontSize.s,
+    flex: 1,
+  },
+  errRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 6,
     marginHorizontal: spacing.l,
     marginBottom: spacing.xs,
   },
+  backRow: { flexDirection: "row", alignItems: "center", gap: 2 },
+  stopRow: { flexDirection: "row", alignItems: "center", gap: 5 },
+  chipRow: { flexDirection: "row", alignItems: "center", gap: 5 },
+  toolLineRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  copiedRow: { flexDirection: "row", alignItems: "center", gap: 5 },
+  cardTitleRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  btnRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  fileRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  attachMenuRow: { flexDirection: "row", alignItems: "center", gap: spacing.m },
+  menuRowIcon: { flexDirection: "row", alignItems: "center", gap: 10 },
+  sheetTitleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
 });

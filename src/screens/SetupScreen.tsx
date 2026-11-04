@@ -11,6 +11,7 @@ import {
   Alert,
 } from "react-native";
 import Constants from "expo-constants";
+import { Ionicons } from "@expo/vector-icons";
 import { OpenCodeApi } from "../api";
 import { checkLatest, downloadAndInstall, isNewer, UPDATE_REPO } from "../updater";
 import { colors, spacing, fontSize } from "../theme";
@@ -19,7 +20,7 @@ interface Props {
   initialURL: string;
   initialPassword: string;
   onSave: (url: string, password: string, repo: string) => void;
-  /** указан, когда открыли через ⚙ из списка сессий — тогда "назад" возвращает туда */
+  /** указан, когда открыли через кнопку настроек из списка сессий — тогда "назад" возвращает туда */
   onCancel?: () => void;
 }
 
@@ -134,7 +135,10 @@ export default function SetupScreen({ initialURL, initialPassword, onSave, onCan
     <View style={s.wrap}>
       {onCancel && (
         <Pressable style={s.back} onPress={onCancel} hitSlop={12}>
-          <Text style={s.backText}>‹ Назад</Text>
+          <View style={s.backRow}>
+            <Ionicons name="chevron-back" size={20} color={colors.accent} />
+            <Text style={s.backText}>Назад</Text>
+          </View>
         </Pressable>
       )}
       <ScrollView
@@ -195,7 +199,10 @@ export default function SetupScreen({ initialURL, initialPassword, onSave, onCan
           {updateBusy ? (
             <ActivityIndicator color={colors.text} />
           ) : (
-            <Text style={s.btnGhostText}>Проверить обновления</Text>
+            <View style={s.ghostRow}>
+              <Ionicons name="cloud-download-outline" size={18} color={colors.text} />
+              <Text style={s.btnGhostText}>Проверить обновления</Text>
+            </View>
           )}
         </Pressable>
         {updateState ? <Text style={s.meta}>{updateState}</Text> : null}
@@ -227,6 +234,7 @@ const s = StyleSheet.create({
     zIndex: 10,
   },
   backText: { color: colors.accent, fontSize: fontSize.l },
+  backRow: { flexDirection: "row", alignItems: "center", gap: 2 },
   label: {
     color: colors.textDim,
     fontSize: fontSize.s,
@@ -293,4 +301,5 @@ const s = StyleSheet.create({
     marginTop: spacing.m,
   },
   btnGhostText: { color: colors.text, fontSize: fontSize.m, fontWeight: "600" },
+  ghostRow: { flexDirection: "row", alignItems: "center", gap: spacing.s },
 });

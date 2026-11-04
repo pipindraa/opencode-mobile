@@ -75,7 +75,8 @@ export function extractList(data: any): any[] {
 export type RenderPart =
   | { kind: "text"; text: string }
   | { kind: "tool"; label: string; state: string }
-  | { kind: "raw"; label: string }
+  /** служебная строка (скрытый текст, файл без url, мысль) — icon: имя иконки Ionicons */
+  | { kind: "raw"; label: string; icon?: string }
   /** вложение (картинка): url — если сервер даёт прямую ссылку, data — если это base64 */
   | { kind: "file"; label: string; mime: string; url?: string; data?: string };
 
@@ -135,7 +136,7 @@ export function parseMessage(raw: any): RenderMessage | null {
   for (const p of partsRaw ?? []) {
     if (p?.type === "text" && typeof p.text === "string" && p.text.trim().length > 0) {
       if (looksLikeInternalDump(p.text)) {
-        parts.push({ kind: "raw", label: "⚙ служебный системный текст (скрыт)" });
+        parts.push({ kind: "raw", label: "Служебный системный текст (скрыт)", icon: "cog-outline" });
         continue;
       }
       parts.push({ kind: "text", text: p.text });
@@ -152,20 +153,20 @@ export function parseMessage(raw: any): RenderMessage | null {
       const url = usableUrl(p?.url);
       const data = typeof p?.data === "string" ? p.data : undefined;
       if (url || data) parts.push({ kind: "file", label: name, mime, url, data });
-      else parts.push({ kind: "raw", label: `📎 ${name}` });
+      else parts.push({ kind: "raw", label: name, icon: "attach-outline" });
     } else if (p?.type === "reasoning" && typeof p.text === "string" && p.text.trim()) {
       // мысли агента — короткий маркер, полный текст слишком шумный
       if (p.text.length > 120) {
-        parts.push({ kind: "raw", label: "💭 размышлял" });
+        parts.push({ kind: "raw", label: "Размышлял", icon: "bulb-outline" });
       } else {
-        parts.push({ kind: "text", text: `💭 ${p.text}` });
+        parts.push({ kind: "raw", label: p.text, icon: "bulb-outline" });
       }
     }
   }
   // user: текст может лежать прямо в m.text
   if (parts.length === 0 && typeof m?.text === "string" && m.text) {
     if (looksLikeInternalDump(m.text)) {
-      parts.push({ kind: "raw", label: "⚙ служебный текст (скрыт)" });
+      parts.push({ kind: "raw", label: "Служебный текст (скрыт)", icon: "cog-outline" });
     } else {
       parts.push({ kind: "text", text: m.text });
     }

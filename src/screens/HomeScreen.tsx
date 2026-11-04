@@ -14,6 +14,7 @@ import {
 import { OpenCodeApi, ServerKind } from "../api";
 import { AsyncStorage } from "../store";
 import { colors, spacing, fontSize } from "../theme";
+import { Ionicons } from "@expo/vector-icons";
 
 /** ID RustDesk на ноутбуке (меняется только при переустановке клиента) */
 const RUSTDESK_ID = "28440006";
@@ -23,7 +24,7 @@ interface Props {
   /** какой сервер показываем — влияет на заголовок, избранное и список папок */
   serverKind: ServerKind;
   onOpen: (sessionID: string, directory: string) => void;
-  /** ⚙ настройки — только для сервера OpenCode */
+  /** настройки — только для сервера OpenCode */
   onSettings?: () => void;
   /** синие точки: закончилось, пока чат был закрыт (сервер OpenCode, из SSE) */
   unread?: Set<string>;
@@ -182,34 +183,34 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings, unread
         <View style={s.headerBtns}>
           {activeCount > 0 && (
             <View style={[s.badge, { borderColor: colors.warn }]}>
-              <Text style={{ color: colors.warn, fontSize: fontSize.s }}>
-                ✋ {activeCount}
-              </Text>
+              <Ionicons name="alert-circle-outline" size={14} color={colors.warn} />
+              <Text style={[s.badgeText, { color: colors.warn }]}>{activeCount}</Text>
             </View>
           )}
           <Pressable style={s.iconBtn} onPress={openRustDesk}>
-            <Text style={{ color: colors.text, fontSize: fontSize.l }}>🖥</Text>
+            <Ionicons name="desktop-outline" size={22} color={colors.text} />
           </Pressable>
           <Pressable style={s.iconBtn} onPress={openCreate}>
-            <Text style={s.iconBtnText}>＋</Text>
+            <Ionicons name="add" size={24} color={colors.text} />
           </Pressable>
           {onSettings && (
             <Pressable style={s.iconBtn} onPress={onSettings}>
-              <Text style={{ color: colors.text, fontSize: fontSize.l }}>⚙</Text>
+              <Ionicons name="settings-outline" size={22} color={colors.text} />
             </Pressable>
           )}
         </View>
       </View>
 
       {error && (
-        <Pressable onPress={load}>
-          <Text style={s.err}>⚠ {error} (нажми — повторит)</Text>
+        <Pressable onPress={load} style={s.errRow}>
+          <Ionicons name="alert-circle-outline" size={15} color={colors.danger} />
+          <Text style={s.err}>{error} (нажми — повторит)</Text>
         </Pressable>
       )}
 
       {/* поиск по названию и папке сессии */}
       <View style={s.searchWrap}>
-        <Text style={s.searchIcon}>🔍</Text>
+        <Ionicons name="search-outline" size={16} color={colors.textDim} />
         <TextInput
           style={s.searchInput}
           value={q}
@@ -221,7 +222,7 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings, unread
         />
         {q.length > 0 && (
           <Pressable hitSlop={10} onPress={() => setQ("")}>
-            <Text style={{ color: colors.textDim, fontSize: fontSize.m }}>✕</Text>
+            <Ionicons name="close" size={15} color={colors.textDim} />
           </Pressable>
         )}
       </View>
@@ -231,11 +232,11 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings, unread
       ) : (
         <FlatList
           data={(() => {
-            const rows: ({ kind: "h"; key: string; label: string } | { kind: "s"; key: string; item: SessionItem })[] = [];
+            const rows: ({ kind: "h"; key: string; label: string; fav?: boolean } | { kind: "s"; key: string; item: SessionItem })[] = [];
             // избранное — закреплено сверху отдельной секцией (как у моделей)
             const favsList = filtered.filter((it) => favs.has(it.id));
             if (favsList.length > 0) {
-              rows.push({ kind: "h", key: "h_favs", label: "★ Избранное" });
+              rows.push({ kind: "h", key: "h_favs", label: "Избранное", fav: true });
               for (const it of favsList) rows.push({ kind: "s", key: it.id, item: it });
             }
             let last = "";
@@ -257,7 +258,14 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings, unread
           ItemSeparatorComponent={() => <View style={{ height: spacing.s }} />}
           renderItem={({ item }) => {
             if (item.kind === "h") {
-              return <Text style={s.dayHdr}>{item.label}</Text>;
+              return item.fav ? (
+                <View style={s.favHdrRow}>
+                  <Ionicons name="star" size={13} color="#f5b73e" />
+                  <Text style={s.dayHdr}>{item.label}</Text>
+                </View>
+              ) : (
+                <Text style={s.dayHdr}>{item.label}</Text>
+              );
             }
             const it = item.item;
             const isFav = favs.has(it.id);
@@ -279,9 +287,9 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings, unread
               >
                 {status}
                 <View style={{ flex: 1 }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.s }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.xs }}>
+                    {isFav && <Ionicons name="star" size={13} color="#f5b73e" />}
                     <Text style={[s.cardTitle, { flex: 1 }]} numberOfLines={1}>
-                      {isFav ? "★ " : ""}
                       {titles?.[it.id] ?? it.title}
                     </Text>
                     <Text style={s.timeTxt}>{timeLabel(it.timeCreated)}</Text>
@@ -291,9 +299,7 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings, unread
                   </Text>
                 </View>
                 <Pressable hitSlop={10} style={{ paddingLeft: spacing.m }} onPress={() => toggleFav(it.id)}>
-                  <Text style={{ color: isFav ? "#f5b73e" : colors.textDim, fontSize: fontSize.xl }}>
-                    {isFav ? "★" : "☆"}
-                  </Text>
+                  <Ionicons name={isFav ? "star" : "star-outline"} size={22} color={isFav ? "#f5b73e" : colors.textDim} />
                 </Pressable>
               </Pressable>
             );
@@ -301,8 +307,8 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings, unread
           ListEmptyComponent={
             <Text style={s.empty}>
               {serverKind === "omnirush"
-                ? "Чатов пока нет. Нажми ＋ чтобы создать.\n\nЧаты из TUI Omnirush на ноуте появятся здесь автоматически."
-                : "Сессий пока нет. Нажми ＋ чтобы создать.\n\nСессии, созданные в TUI на ноуте, тоже появятся здесь после обновления."}
+                ? "Чатов пока нет. Нажми «+» вверху, чтобы создать.\n\nЧаты из TUI Omnirush на ноуте появятся здесь автоматически."
+                : "Сессий пока нет. Нажми «+» вверху, чтобы создать.\n\nСессии, созданные в TUI на ноуте, тоже появятся здесь после обновления."}
             </Text>
           }
         />
@@ -358,12 +364,16 @@ const s = StyleSheet.create({
   title: { color: colors.text, fontSize: fontSize.xl, fontWeight: "700", flex: 1 },
   headerBtns: { flexDirection: "row", alignItems: "center", gap: spacing.s },
   badge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
     borderColor: colors.border,
     borderWidth: 1,
     borderRadius: 8,
     paddingHorizontal: spacing.s,
     paddingVertical: spacing.xs,
   },
+  badgeText: { fontSize: fontSize.s, fontWeight: "700" },
   iconBtn: {
     backgroundColor: colors.surface,
     borderColor: colors.border,
@@ -374,7 +384,6 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  iconBtnText: { color: colors.text, fontSize: fontSize.xl },
   searchWrap: {
     flexDirection: "row",
     alignItems: "center",
@@ -387,7 +396,6 @@ const s = StyleSheet.create({
     paddingHorizontal: spacing.m,
     gap: spacing.s,
   },
-  searchIcon: { fontSize: fontSize.s },
   searchInput: {
     flex: 1,
     color: colors.text,
@@ -420,6 +428,7 @@ const s = StyleSheet.create({
     marginTop: spacing.m,
     marginBottom: spacing.xs,
   },
+  favHdrRow: { flexDirection: "row", alignItems: "center", gap: 5 },
   timeTxt: { color: colors.textDim, fontSize: fontSize.s },
   empty: {
     color: colors.textDim,
@@ -428,11 +437,11 @@ const s = StyleSheet.create({
     marginTop: spacing.xl * 2,
     marginHorizontal: spacing.xl,
   },
+  errRow: { flexDirection: "row", alignItems: "flex-start", gap: 6, marginHorizontal: spacing.l, marginBottom: spacing.s },
   err: {
     color: colors.danger,
     fontSize: fontSize.s,
-    marginHorizontal: spacing.l,
-    marginBottom: spacing.s,
+    flex: 1,
   },
   btn: {
     backgroundColor: colors.accent,

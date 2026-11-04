@@ -369,6 +369,50 @@ logcat-проверки.
 - [x] tsc 0 ошибок; versionName 1.6.5 / versionCode 10605 / app.json 1.6.5
 - [x] Сборка 10605 (gradlew assembleRelease, 4м43с, бандл свежий) → APK: versionCode=10605 versionName=1.6.5 (aapt)
 - [x] Релиз v1.6.5 на GitHub + APK (app-release-1.6.5.apk, Latest)
-- [ ] Владелец: паузы <3с не рвут текст; ~6с тишины → текст в поле;
-      ⏹ → всё накопленное в поле; длинная диктовка с паузами не теряется
+- [x] Владелец: голос работает, паузы не рвут текст (04.11) — голосовая задача ЗАКРЫТА
+
+## v1.6.6 (04.11) — иконочная система вместо эмодзи + полировка
+Владелец: «сделай его получше, а то сейчас уродливые эмодзи и тд».
+Реализовано через skill impeccable (режим Operate/REFINEMENT): текущая
+тёмная дизайн-система (theme.ts) СОХРАНЕНА — это refinement, не redesign.
+
+- Зависимость: `@expo/vector-icons` (Ionicons, SDK 58) — единая штриховая
+  иконочная система на всё приложение (бесплатно, шрифт бандлится в пакете).
+  ВАЖНО: в бандле Ionicons 8 — часть имён переименована: скрепка = `attach-outline`
+  (не paperclip), откат = `arrow-undo-outline` (не arrow-uturn-back), сжать =
+  `contract-outline` (не compress), «⋯» = `ellipsis-horizontal(-outline)`.
+- HomeScreen: шапка — alert-бейдж (число активных), desktop, «+» (add), settings;
+  строка ошибки с alert-иконкой; поиск (search/close); «Избранное» — золотая звезда;
+  карточки: звёздный тогл (star/star-outline, #f5b73e), имя без «★ ».
+- ChatScreen (~40 точек): шапка (chevron-back «Назад», Стоп = stop-иконка+текст);
+  ошибки — alert-circle; чипы инфо-строки (hardware-chip/person-circle/folder/
+  stats-chart + chevron-down у раскрывающихся); статус-бар — иконка по смыслу
+  (tool: construct / typing: create / think: bulb / perm: alert warn /
+  «отправляю»: paper-plane) + бегущие точки + таймер; «Скопировано» —
+  checkmark-circle, цвет #0a2 → colors.ok (контраст); строки инструментов в
+  пузыре — иконка по state (running=construct accent, completed=checkmark ok,
+  error=close danger, else=ellipsis dim) + «…»; файлы/мысли/служебное —
+  icon-поле RenderPart (attach/bulb/cog, из api.ts); лист моделей (checkmark/
+  chevron-раскрытие/звёзды; активный режим показан подписью «режим: X»;
+  хинт без «☆ ▸»); лист агентов (checkmark); карточка контекста
+  (stats-chart/cash, подписи «вход/выход/размышление/кэш», сжатие = contract);
+  лист файлов (time/image/document, копировать путь = copy); голосовая строка
+  (mic); «вниз» (arrow-down); строка ввода (attach 22 / mic / stop / arrow-forward);
+  вложения (close-удаление; меню: images/camera иконка+колонка); меню сообщения
+  (copy / arrow-undo danger); кнопка меню у пузыря (ellipsis-horizontal).
+- Activity-лейблы: формат `tool:…` / `typing:…` / `think:…` / `perm:…`
+  (parseActivity) — вид определяет иконку, текст без эмодзи-префиксов.
+- api.ts: у raw-частей поле `icon?: string` (имя глифа Ionicons); лейблы без
+  эмодзи («Служебный системный текст (скрыт)», имя файла, «Размышлял»).
+- SetupScreen: «Назад» (chevron-back), «Проверить обновления» (cloud-download).
+- tokLabel: `↑.. ↓.. $..` → «X в · X из · $..»; хинт файлов: «копируй путь
+  (иконка справа)».
+- Уведомления (шторка Android) — не трогали: там эмодзи-статус уместен,
+  векторные иконки в текст не встраиваются.
+- Голос (voice.ts / useEffect диктовки) НЕ МЕНЯЛСЯ — подтверждённая механика.
+- [x] tsc 0 ошибок; impeccable detect --json по 4 изменённым файлам = [] (чисто)
+- [x] versionName 1.6.6 / versionCode 10606 / app.json 1.6.6
+- [x] Сборка 10606 (gradlew assembleRelease, 5м12с, бандл свежий — 811 модулей)
+  → APK: versionCode=10606 versionName=1.6.6 (aapt); releases/app-release-1.6.6.apk
+- [ ] Релиз v1.6.6 на GitHub + APK; владелец ставит через «Проверить обновления»
 
