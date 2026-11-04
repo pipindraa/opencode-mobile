@@ -88,6 +88,20 @@ export interface RenderMessage {
 }
 
 /**
+ * URI, пригодный к загрузке С ТЕЛЕФОНА: http(s), data:, content: или локальный
+ * файл телефона (file:///data/..., file:///storage/...). У форка в файлах
+ * приходит source.uri — путь НА СЕРВЕРЕ (file:///C:/Users/kiril/...) — на
+ * телефоне его не загрузить; в этом случае рендерится base64 из .data.
+ */
+function usableUrl(u: unknown): string | undefined {
+  if (typeof u !== "string" || !u) return undefined;
+  if (u.startsWith("http://") || u.startsWith("https://") || u.startsWith("data:")) return u;
+  if (u.startsWith("content://")) return u;
+  if (u.startsWith("file:///data/") || u.startsWith("file:///storage/") || u.startsWith("file://data/")) return u;
+  return undefined;
+}
+
+/**
  * Вытаскивает сообщение из разных возможных форм записи
  * (прямое / обёрнутое в info / etc.)
  */
@@ -135,7 +149,7 @@ export function parseMessage(raw: any): RenderMessage | null {
       // вложение: у v2 файл описывается url/mime, у части сборок — base64 в .data
       const name = String(p?.filename ?? p?.name ?? p?.file ?? "файл");
       const mime = String(p?.mime ?? p?.mediaType ?? "application/octet-stream");
-      const url = typeof p?.url === "string" ? p.url : undefined;
+      const url = usableUrl(p?.url);
       const data = typeof p?.data === "string" ? p.data : undefined;
       if (url || data) parts.push({ kind: "file", label: name, mime, url, data });
       else parts.push({ kind: "raw", label: `📎 ${name}` });
@@ -170,8 +184,7 @@ export function parseMessage(raw: any): RenderMessage | null {
     for (const f of filesRaw) {
       const name = String(f?.name ?? f?.filename ?? "файл");
       const mime = String(f?.mime ?? f?.mediaType ?? "application/octet-stream");
-      const url =
-        typeof f?.url === "string" ? f.url : typeof f?.source?.uri === "string" ? f.source.uri : undefined;
+      const url = usableUrl(f?.url) ?? usableUrl(f?.source?.uri);
       const data = typeof f?.data === "string" ? f.data : undefined;
       if (url || data) parts.push({ kind: "file", label: name, mime, url, data });
     }

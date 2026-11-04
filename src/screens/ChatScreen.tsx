@@ -44,6 +44,8 @@ interface ChatBubble {
   id?: string;
   role: string;
   parts: RenderPart[];
+  /** время создания (для времени в пузыре, как в ТГ) */
+  time?: number;
 }
 
 interface PermCard {
@@ -52,6 +54,22 @@ interface PermCard {
 }
 
 const POLL_MS = 1600;
+
+/** Код ошибки распознавателя → человекочитаемо (по SpeechRecognizer.ERROR_*) */
+function voiceErrorText(e: string): string {
+  const code = String(e).split("/")[0];
+  const map: Record<string, string> = {
+    "1": "ошибка аудио (микрофон)",
+    "3": "остановлено — слов не распознал",
+    "6": "нет разрешения на микрофон",
+    "7": "сетевая ошибка (распознаванию нужен интернет)",
+    "8": "таймаут сети",
+    "9": "не расслышал — попробуй ещё раз",
+    "10": "распознаватель занят — попробуй ещё раз",
+    "11": "таймаут речи (молчание)",
+  };
+  return map[code] ?? String(e);
+}
 
 type ModelRow = { id: string; providerID: string; name: string; variants: string[] };
 
@@ -270,6 +288,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
           id: m.id,
           role,
           parts: Array.isArray(m.parts) ? m.parts : [],
+          time: m.time,
         };
       });
       // дедупликация локального эха: текст уже пришёл с сервера → убираем
@@ -627,18 +646,14 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     setTimeout(() => setCopied(false), 1500);
   };
 
-  /** режим выделения части текста: selectable на Text → системные ручки Android */
-  const [selectKey, setSelectKey] = useState<string | null>(null);
-
-  const onBubbleLongPress = (b: ChatBubble) => {
-    const hasText = b.parts.some((p) => p.kind === "text" && (p as any).text.trim());
-    const opts: { text: string; style?: "default" | "cancel" | "destructive"; onPress?: () => void }[] = [];
-    if (hasText) opts.push({ text: "Копировать всё", onPress: () => copyBubble(b) });
-    if (hasText) opts.push({ text: "Выделить часть", onPress: () => setSelectKey(b.key) });
-    if (b.id) opts.push({ text: "Откатить с этого", style: "destructive", onPress: () => doRevert(b) });
-    opts.push({ text: "Отмена", style: "cancel" });
-    Alert.alert(b.role === "user" ? "Твоё сообщение" : "Ответ агента", "", opts);
-  };
+  /**
+   * Меню сообщения — кнопка «⋯» рядом с пузырём. Долгое нажатие на сам текст —
+   * нативное выделение Android (selectable): зажал на слове → ручки → копировать.
+   */
+  const [menuBubble, setMenuBubble] = useState<ChatBubble | null>(null);
+  const openMenu = (b: ChatBubble) => setMenuBubble(b);
+  const closeMenu = () => setMenuBubble(null);
+  const hasText = (b: ChatBubble) => b.parts.some((p) => p.kind === "text" && (p as any).text.trim());
 
   const decide = async (requestID: string, decision: Decision) => {
     setPerms((prev) => prev.filter((p) => p.requestID !== requestID));
@@ -710,22 +725,44 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     if (!voiceOn) return;
     let finished = false;
     let collectTimer: ReturnType<typeof setTimeout> | null = null;
+    let voiceEndAt = 0;
 
-    const collect = async () => {
+    /**
+     * Финал: текст → в поле; пусто + ошибка → показываем (раньше при ручном
+     * стопе ошибка глоталась — получалось «не работает» без объяснений).
+     */
+    const finishVoice = (text: string, error: string) => {
       if (finished) return;
       finished = true;
-      const { text, error } = await voiceNative.getSpeechResults();
+      if (collectTimer) clearTimeout(collectTimer);
       const t = text.trim();
       setVoiceOn(false);
       setDictation("");
       dictRef.current = "";
       if (t) {
         setInput((prev) => (prev ? prev.trimEnd() + " " + t : t));
-      } else if (error && !stoppingRef.current) {
-        // «No speech input»/ошибка при спонтанном конце — показываем;
-        // при ручном стопе молча закрываем
-        setError("Голос: " + error);
+      } else if (error) {
+        console.log("[voice] finishVoice без текста, error=" + error);
+        setError("Голос: " + voiceErrorText(error));
+      } else {
+        console.log("[voice] finishVoice: пусто, без ошибки");
+        setError("Голос: не распознал — попробуй ещё раз");
       }
+    };
+
+    /**
+     * Android шлёт onResults ПОСЛЕ onEndOfSpeech — даём нативу до 4с:
+     * опрашиваем getSpeechResults каждые 400мс, пока не придёт текст.
+     */
+    const collect = async () => {
+      if (finished) return;
+      const { text, error } = await voiceNative.getSpeechResults();
+      if (finished) return;
+      if (text.trim()) return finishVoice(text, "");
+      // спонтанный конец с ошибкой — завершаем сразу, не ждём финал
+      if (error && !stoppingRef.current) return finishVoice("", error);
+      if (Date.now() - voiceEndAt > 4000) return finishVoice("", error || "");
+      collectTimer = setTimeout(collect, 400);
     };
 
     const tick = async () => {
@@ -740,13 +777,14 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         }
         return;
       }
-      // речь кончилась (тишина / ошибка / ручной стоп) — даём нативу
-      // донести onResults после stopListening, потом забираем текст
-      collectTimer = setTimeout(collect, 800);
+      // речь кончилась (тишина / ошибка / ручной стоп)
+      voiceEndAt = Date.now();
+      collectTimer = setTimeout(collect, 400);
     };
 
     const id = setInterval(tick, 700);
     return () => {
+      finished = true;
       clearInterval(id);
       if (collectTimer) clearTimeout(collectTimer);
     };
@@ -914,18 +952,6 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </View>
       )}
 
-      {/* режим выделения части текста: системные ручки Android + кнопка выхода */}
-      {selectKey && (
-        <View style={s.selBar}>
-          <Text style={s.selBarText} numberOfLines={2}>
-            Выдели текст: нажми и держи на слове, растяни ручки, «Копировать» из меню
-          </Text>
-          <Pressable style={s.selBarBtn} onPress={() => setSelectKey(null)}>
-            <Text style={{ color: "#fff", fontWeight: "700" }}>Готово</Text>
-          </Pressable>
-        </View>
-      )}
-
       {copied && (
         <View style={s.copiedBar}>
           <Text style={{ color: "#0a2", fontWeight: "700" }}>✓ Скопировано</Text>
@@ -940,55 +966,98 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         ItemSeparatorComponent={() => <View style={{ height: spacing.s }} />}
         renderItem={({ item }) => {
           const isUser = item.role === "user";
-          const selecting = selectKey === item.key;
           const isStreamBubble = item.key.startsWith("stream-");
           return (
-            <View style={{ paddingHorizontal: spacing.l, flexDirection: "row", justifyContent: isUser ? "flex-end" : "flex-start" }}>
-              <Pressable
-                onLongPress={selecting ? undefined : () => onBubbleLongPress(item)}
-                delayLongPress={400}
-                style={[s.bubble, isUser ? s.bubbleUser : s.bubbleBot]}
-              >
-                {item.parts.map((p: RenderPart, i: number) => {
-                  if (p.kind === "text") {
-                    // курсор «печатает…» — на хвосте стрим-пузыря, пока агент работает
-                    const cursor = isStreamBubble && busy && i === item.parts.length - 1 ? " ▍" : "";
-                    return (
-                      <Text key={i} selectable={selecting} style={[s.bubbleText, isUser && { color: "#fff" }]}>
-                        {p.text}
-                        {cursor}
-                      </Text>
-                    );
-                  }
-                  if (p.kind === "tool") {
-                    return (
-                      <View key={i} style={s.toolLine}>
-                        <Text style={s.toolText}>
-                          {p.state === "running" ? "⚙ " : p.state === "completed" ? "✓ " : p.state === "error" ? "✗ " : "• "}
-                          {p.label}
-                          {p.state === "running" ? " …" : ""}
+            <View
+              style={{
+                paddingHorizontal: spacing.l,
+                flexDirection: "row",
+                justifyContent: isUser ? "flex-end" : "flex-start",
+                alignItems: "center",
+                gap: spacing.xs,
+              }}
+            >
+              {isUser && <BubbleMenuBtn onOpen={() => openMenu(item)} />}
+              <View style={[s.bubble, isUser ? s.bubbleUser : s.bubbleBot]}>
+                {(() => {
+                  // картинки группируем, как в Telegram: одна — большая,
+                  // 2+ — сеткой по две; тап по любой — на весь экран
+                  const nodes: React.ReactNode[] = [];
+                  let imgRun: string[] = [];
+                  const imgSrc = (p: RenderPart) =>
+                    p.kind === "file" ? p.url ?? (p.data ? `data:${p.mime};base64,${p.data}` : undefined) : undefined;
+                  const flushImgs = () => {
+                    if (imgRun.length === 0) return;
+                    const key = "img" + nodes.length;
+                    if (imgRun.length === 1) {
+                      nodes.push(
+                        <Pressable key={key} onPress={() => setFilePreview(imgRun[0])}>
+                          <Image source={{ uri: imgRun[0] }} style={s.imgSingle} resizeMode="cover" />
+                        </Pressable>
+                      );
+                    } else {
+                      nodes.push(
+                        <View key={key} style={s.imgGrid}>
+                          {imgRun.map((u, i) => (
+                            <Pressable key={i} onPress={() => setFilePreview(u)}>
+                              <Image source={{ uri: u }} style={s.imgCell} resizeMode="cover" />
+                            </Pressable>
+                          ))}
+                        </View>
+                      );
+                    }
+                    imgRun = [];
+                  };
+                  item.parts.forEach((p: RenderPart, i: number) => {
+                    const src = imgSrc(p);
+                    if (p.kind === "file" && p.mime.startsWith("image/") && src) {
+                      imgRun.push(src);
+                      return;
+                    }
+                    flushImgs();
+                    if (p.kind === "text") {
+                      // курсор «печатает…» — на хвосте стрим-пузыря, пока агент работает
+                      const cursor = isStreamBubble && busy && i === item.parts.length - 1 ? " ▍" : "";
+                      nodes.push(
+                        <Text key={i} selectable style={[s.bubbleText, isUser && { color: "#fff" }]}>
+                          {p.text}
+                          {cursor}
                         </Text>
-                      </View>
-                    );
-                  }
-                  if (p.kind === "file") {
-                    const isImg = p.mime.startsWith("image/");
-                    const src = p.url ?? (p.data ? `data:${p.mime};base64,${p.data}` : undefined);
-                    return isImg && src ? (
-                      <Image key={i} source={{ uri: src }} style={s.attachImg} resizeMode="cover" />
-                    ) : (
-                      <Text key={i} style={s.toolText}>
-                        📎 {p.label}
-                      </Text>
-                    );
-                  }
-                  return (
-                    <Text key={i} style={s.toolText}>
-                      {p.label}
-                    </Text>
-                  );
-                })}
-              </Pressable>
+                      );
+                    } else if (p.kind === "tool") {
+                      nodes.push(
+                        <View key={i} style={s.toolLine}>
+                          <Text style={s.toolText}>
+                            {p.state === "running" ? "⚙ " : p.state === "completed" ? "✓ " : p.state === "error" ? "✗ " : "• "}
+                            {p.label}
+                            {p.state === "running" ? " …" : ""}
+                          </Text>
+                        </View>
+                      );
+                    } else if (p.kind === "file") {
+                      nodes.push(
+                        <Text key={i} style={s.toolText}>
+                          📎 {p.label}
+                        </Text>
+                      );
+                    } else {
+                      nodes.push(
+                        <Text key={i} style={s.toolText}>
+                          {p.label}
+                        </Text>
+                      );
+                    }
+                  });
+                  flushImgs();
+                  return nodes;
+                })()}
+                {item.time ? (
+                  <Text style={[s.bubbleTime, isUser && { color: "rgba(255,255,255,0.65)" }]}>
+                    {new Date(item.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </Text>
+                ) : null}
+              </View>
+              {!isUser && <BubbleMenuBtn onOpen={() => openMenu(item)} />}
             </View>
           );
         }}
@@ -1189,11 +1258,6 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         <Pressable style={s.attachBtn} onPress={() => setAttachMenu(true)}>
           <Text style={{ color: colors.textDim, fontSize: fontSize.xl }}>📎</Text>
         </Pressable>
-        <Pressable style={s.attachBtn} onPress={toggleVoice}>
-          <Text style={{ color: voiceOn ? colors.danger : colors.textDim, fontSize: fontSize.xl }}>
-            {voiceOn ? "⏹" : "🎤"}
-          </Text>
-        </Pressable>
         <TextInput
           style={s.input}
           value={input}
@@ -1202,12 +1266,33 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
           placeholderTextColor={colors.textDim}
           multiline
         />
+        {/* как в Telegram: на месте «отправить» — микрофон; кнопка отправки
+            появляется, только когда есть текст/вложения; при диктовке — стоп */}
         <Pressable
-          style={[s.sendBtn, (!input.trim() && attachments.length === 0) || sending ? { opacity: 0.4 } : null]}
-          onPress={send}
-          disabled={(!input.trim() && attachments.length === 0) || sending}
+          style={[s.sendBtn, sending ? { opacity: 0.6 } : null]}
+          onPress={() => {
+            if (sending) return;
+            if (voiceOn) {
+              toggleVoice();
+              return;
+            }
+            if (input.trim().length > 0 || attachments.length > 0) {
+              send();
+              return;
+            }
+            toggleVoice();
+          }}
+          disabled={sending}
         >
-          {sending ? <ActivityIndicator color="#fff" size="small" /> : <Text style={s.sendText}>▶</Text>}
+          {sending ? (
+            <ActivityIndicator color="#fff" size="small" />
+          ) : voiceOn ? (
+            <Text style={{ color: "#fff", fontSize: fontSize.l, fontWeight: "700" }}>⏹</Text>
+          ) : input.trim().length > 0 || attachments.length > 0 ? (
+            <Text style={s.sendText}>▶</Text>
+          ) : (
+            <Text style={{ fontSize: fontSize.xl }}>🎤</Text>
+          )}
         </Pressable>
       </View>
 
@@ -1259,6 +1344,35 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </Pressable>
       </Modal>
 
+      {/* меню сообщения: «⋯» рядом с пузырём (выделение текста — нативное, зажатием) */}
+      <Modal visible={menuBubble !== null} transparent animationType="fade" onRequestClose={closeMenu}>
+        <Pressable style={s.overlay} onPress={closeMenu}>
+          <View style={s.modal}>
+            <Text style={s.sheetTitle}>{menuBubble?.role === "user" ? "Твоё сообщение" : "Ответ агента"}</Text>
+            {menuBubble && hasText(menuBubble) ? (
+              <Pressable style={s.menuRow} onPress={() => { copyBubble(menuBubble); closeMenu(); }}>
+                <Text style={s.menuRowText}>📋 Копировать всё</Text>
+              </Pressable>
+            ) : null}
+            {menuBubble?.id ? (
+              <Pressable
+                style={s.menuRow}
+                onPress={() => {
+                  const b = menuBubble;
+                  closeMenu();
+                  doRevert(b);
+                }}
+              >
+                <Text style={[s.menuRowText, { color: colors.danger }]}>⟲ Откатить с этого</Text>
+              </Pressable>
+            ) : null}
+            <Pressable style={[s.btn, s.btnGhost]} onPress={closeMenu}>
+              <Text style={[s.btnText, { color: colors.text }]}>Отмена</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
+
       {/* превью скачанной картинки: тап — закрыть */}
       <Modal visible={filePreview != null} transparent animationType="fade" onRequestClose={() => setFilePreview(null)}>
         <View style={s.overlay}>
@@ -1274,6 +1388,29 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </View>
       </Modal>
     </Animated.View>
+  );
+}
+
+/** «⋯» рядом с пузырём: меню сообщения (копировать всё / откатить).
+ *  Долгое нажатие на текст — нативное выделение, оно не уходит сюда. */
+function BubbleMenuBtn({ onOpen }: { onOpen: () => void }) {
+  return (
+    <Pressable
+      onPress={onOpen}
+      hitSlop={6}
+      style={{
+        width: 28,
+        height: 28,
+        borderRadius: 14,
+        backgroundColor: colors.surface2,
+        borderColor: colors.border,
+        borderWidth: 1,
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <Text style={{ color: colors.textDim, fontSize: fontSize.m, fontWeight: "700", lineHeight: 14 }}>⋯</Text>
+    </Pressable>
   );
 }
 
@@ -1306,7 +1443,16 @@ const s = StyleSheet.create({
     alignSelf: "flex-start",
   },
   toolText: { color: colors.textDim, fontSize: fontSize.s },
-  attachImg: { width: 220, height: 165, borderRadius: 10, marginTop: spacing.xs },
+  imgSingle: { width: 260, height: 195, borderRadius: 10, marginTop: spacing.xs },
+  imgGrid: { flexDirection: "row", flexWrap: "wrap", gap: 4, marginTop: spacing.xs },
+  imgCell: { width: 146, height: 110, borderRadius: 8 },
+  bubbleTime: {
+    color: colors.textDim,
+    fontSize: fontSize.s,
+    alignSelf: "flex-end",
+    marginTop: 3,
+    textAlign: "right",
+  },
   statusBar: {
     flexDirection: "row",
     alignItems: "center",
@@ -1343,6 +1489,14 @@ const s = StyleSheet.create({
     borderRadius: 10,
     backgroundColor: colors.surface2,
   },
+  menuRow: {
+    backgroundColor: colors.surface2,
+    borderRadius: 12,
+    paddingHorizontal: spacing.m,
+    paddingVertical: 14,
+    marginBottom: spacing.xs,
+  },
+  menuRowText: { color: colors.text, fontSize: fontSize.m, fontWeight: "600" },
   selBarText: { color: colors.textDim, fontSize: fontSize.s, flex: 1 },
   selBarBtn: {
     backgroundColor: colors.accent,
@@ -1500,7 +1654,8 @@ const s = StyleSheet.create({
     paddingBottom: 10,
     color: colors.text,
     fontSize: fontSize.m,
-    maxHeight: 120,
+    textAlignVertical: "top",
+    maxHeight: 240,
   },
   sendBtn: {
     backgroundColor: colors.accent,
