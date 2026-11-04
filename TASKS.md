@@ -459,5 +459,9 @@ logcat-проверки.
   Секция «Избранное» со своей звездой-маркером не тронута.
 - [x] tsc 0 ошибок
 - [x] versionName 1.6.8 / versionCode 10608 / app.json 1.6.8
-- [ ] Сборка 10608 → APK → релиз v1.6.8 на GitHub
+- [x] Сборка 10608 → APK → релиз v1.6.8 на GitHub
+  → APK: versionCode=10608 versionName=1.6.8 (aapt); releases/app-release-1.6.8.apk
+- [x] Релиз v1.6.8 на GitHub + APK (app-release-1.6.8.apk, Latest);
+  коммит 1350c2e в origin/master
+- [ ] Владелец: ставит 1.6.8 через «Проверить обновления», проверяет
 
