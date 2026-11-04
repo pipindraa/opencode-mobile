@@ -19,6 +19,7 @@ import {
   ScrollView,
   Platform,
   PermissionsAndroid,
+  Linking,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import { File, Paths, Directory } from "expo-file-system";
@@ -139,12 +140,19 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   // — голосовой ввод: тап 🎤 → дикт → вставляется в поле, без авто-отправки —
   const [voiceOn, setVoiceOn] = useState(false);
   const [dictation, setDictation] = useState("");
+  /** listening — ждём речь; processing — пользователь нажал стоп, готовим текст */
+  const [voicePhase, setVoicePhase] = useState<"listening" | "processing">("listening");
   const dictRef = useRef("");
   // — файлы сессии (что агент изменил/создал) —
   const [files, setFiles] = useState<{ path: string; last: number }[] | null>(null);
   const [fileBusy, setFileBusy] = useState<string | null>(null);
   const [filePreview, setFilePreview] = useState<string | null>(null);
   const [fileErr, setFileErr] = useState<string | null>(null);
+  /** превью: data:URI материализуем во временный файл — Image в Modal из data:
+   *  на Android капризничает, file:// — самый надёжный путь */
+  const [previewFile, setPreviewFile] = useState<string | null>(null);
+  const [previewErr, setPreviewErr] = useState<string | null>(null);
+  const [previewSize, setPreviewSize] = useState<{ w: number; h: number } | null>(null);
 
   const modelKey = (m: ModelRow) => `${m.providerID}/${m.id}`;
 
@@ -682,14 +690,17 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
 
   // ————————————————— голосовой ввод —————————————————
   // тап 🎤 → диктуем → текст вставляется в поле (без авто-отправки).
-  // Второй тап (⏹ / «Готово») — стоп. RN 0.88 bridgeless: события модуля не
-  // доходят, поэтому JS опрашивает isRecognizing() + getSpeechResults() —
-  // пока идёт речь, обновляем живую строку; когда кончилась — забираем текст.
+  // Второй тап по той же кнопке (⏹) — стоп. RN 0.88 bridgeless: события
+  // модуля не доходят, JS опрашивает isRecognizing() + getSpeechResults().
+  // Все нативные вызовы обёрнуты таймаутами (voice.ts) + watchdog ниже —
+  // режим диктовки не должен зависнуть «намертво».
   const stoppingRef = useRef(false);
+  const voiceStartRef = useRef(0);
 
   const toggleVoice = async () => {
     if (voiceOn) {
       stoppingRef.current = true;
+      setVoicePhase("processing");
       voiceNative.stop();
       return;
     }
@@ -714,9 +725,13 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     try {
       dictRef.current = "";
       setDictation("");
+      setVoicePhase("listening");
+      voiceStartRef.current = Date.now();
+      console.log("[voice] start " + new Date().toISOString());
       await voiceNative.start("ru-RU");
       setVoiceOn(true);
     } catch (e: any) {
+      console.log("[voice] start failed: " + (e?.message ?? e));
       setError("Микрофон не запустился: " + (e?.message ?? e));
     }
   };
@@ -728,8 +743,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     let voiceEndAt = 0;
 
     /**
-     * Финал: текст → в поле; пусто + ошибка → показываем (раньше при ручном
-     * стопе ошибка глоталась — получалось «не работает» без объяснений).
+     * Финал: текст → в поле; пусто + ошибка → показываем причину.
      */
     const finishVoice = (text: string, error: string) => {
       if (finished) return;
@@ -737,22 +751,24 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       if (collectTimer) clearTimeout(collectTimer);
       const t = text.trim();
       setVoiceOn(false);
+      setVoicePhase("listening");
       setDictation("");
       dictRef.current = "";
+      console.log("[voice] finish: textLen=" + t.length + " error=" + (error || "<нет>") + " manual=" + stoppingRef.current);
       if (t) {
         setInput((prev) => (prev ? prev.trimEnd() + " " + t : t));
+      } else if (error === "watchdog") {
+        setError("Голос: зависло — попробуй ещё раз");
       } else if (error) {
-        console.log("[voice] finishVoice без текста, error=" + error);
         setError("Голос: " + voiceErrorText(error));
       } else {
-        console.log("[voice] finishVoice: пусто, без ошибки");
         setError("Голос: не распознал — попробуй ещё раз");
       }
     };
 
     /**
-     * Android шлёт onResults ПОСЛЕ onEndOfSpeech — даём нативу до 4с:
-     * опрашиваем getSpeechResults каждые 400мс, пока не придёт текст.
+     * Android шлёт onResults ПОСЛЕ onEndOfSpeech — опрашиваем getSpeechResults
+     * каждые 400мс. Ручной стоп (пользователь ждёт) — окно короче: 2.5с.
      */
     const collect = async () => {
       if (finished) return;
@@ -761,15 +777,29 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       if (text.trim()) return finishVoice(text, "");
       // спонтанный конец с ошибкой — завершаем сразу, не ждём финал
       if (error && !stoppingRef.current) return finishVoice("", error);
-      if (Date.now() - voiceEndAt > 4000) return finishVoice("", error || "");
+      const window = stoppingRef.current ? 2500 : 4000;
+      if (Date.now() - voiceEndAt > window) return finishVoice("", error || "");
       collectTimer = setTimeout(collect, 400);
     };
 
     const tick = async () => {
       if (finished) return;
+      // watchdog: диктовка висит больше 45с — что-то сломалось,
+      // вытаскиваем из мёртвого состояния (stop + ошибка)
+      if (voiceStartRef.current && Date.now() - voiceStartRef.current > 45000) {
+        voiceNative.stop();
+        return finishVoice("", "watchdog");
+      }
+      // после ручного стопа не ждём isRecognizing — сразу собираем результат
+      if (stoppingRef.current && !voiceEndAt) {
+        voiceEndAt = Date.now();
+        collectTimer = setTimeout(collect, 400);
+        return;
+      }
       const recognizing = await voiceNative.isRecognizing();
+      if (finished) return;
       if (recognizing) {
-        // живая строка: последний partial с опозданием ~0.7с
+        // живая строка: последний partial с опозданием ~0.5-0.7с
         const { text } = await voiceNative.getSpeechResults();
         if (text && text !== dictRef.current) {
           dictRef.current = text;
@@ -797,6 +827,53 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     },
     []
   );
+
+  // полный экран картинки: data: base64 → во временный файл (file:// в Modal
+  // надёжнее, чем data:URI длинной в ~150КБ), при закрытии — удаляем
+  useEffect(() => {
+    let alive = true;
+    setPreviewFile(null);
+    setPreviewErr(null);
+    setPreviewSize(null);
+    if (filePreview && filePreview.startsWith("data:")) {
+      const comma = filePreview.indexOf(",");
+      const meta = filePreview.slice(5, comma);
+      const b64 = filePreview.slice(comma + 1);
+      const path = Paths.cache + "/preview-" + Date.now() + (meta.includes("png") ? ".png" : ".jpg");
+      new File(path)
+        .write(b64, { encoding: "base64" })
+        .then(() => {
+          if (alive) setPreviewFile(path);
+        })
+        .catch((e: any) => {
+          console.log("[img] preview write failed: " + (e?.message ?? e));
+        });
+    }
+    return () => {
+      alive = false;
+    };
+  }, [filePreview]);
+
+  const closePreview = () => {
+    setFilePreview(null);
+    if (previewFile) {
+      try {
+        const f = new File(previewFile);
+        if (f.exists) f.delete();
+      } catch {
+        /* не критично */
+      }
+    }
+  };
+
+  /** вписать картинку в экран (не больше 75% высоты, без растяжения) */
+  const previewFit = useMemo(() => {
+    if (!previewSize) return null;
+    const maxW = Dimensions.get("window").width - spacing.l * 2;
+    const maxH = Dimensions.get("window").height * 0.75;
+    const k = Math.min(1, maxW / previewSize.w, maxH / previewSize.h);
+    return { w: Math.round(previewSize.w * k), h: Math.round(previewSize.h * k) };
+  }, [previewSize]);
 
   // ————————————————— файлы сессии (блок E) —————————————————
   // Сервер отдаёт файлы только из своего корня (C:\Users\kiril). Файлы на D:
@@ -1016,14 +1093,17 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                     }
                     flushImgs();
                     if (p.kind === "text") {
-                      // курсор «печатает…» — на хвосте стрим-пузыря, пока агент работает
+                      // markdown в пузыре (bold/код/блоки/ссылки); курсор
+                      // «печатает…» — на хвосте стрим-пузыря, пока агент работает
                       const cursor = isStreamBubble && busy && i === item.parts.length - 1 ? " ▍" : "";
-                      nodes.push(
-                        <Text key={i} selectable style={[s.bubbleText, isUser && { color: "#fff" }]}>
-                          {p.text}
-                          {cursor}
-                        </Text>
-                      );
+                      renderMdBlocks(p.text, isUser, `b${i}-`).forEach((n) => nodes.push(n));
+                      if (cursor) {
+                        nodes.push(
+                          <Text key={i + "-cur"} style={[s.bubbleText, isUser && { color: "#fff" }]}>
+                            {cursor}
+                          </Text>
+                        );
+                      }
                     } else if (p.kind === "tool") {
                       nodes.push(
                         <View key={i} style={s.toolLine}>
@@ -1242,15 +1322,13 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </View>
       </Modal>
 
-      {/* строка диктовки: тап по 🎤 ещё раз — вставить в поле */}
+      {/* строка диктовки: живой текст; единственный стоп — ⏹ на кнопке отправки */}
       {voiceOn && (
         <View style={s.selBar}>
+          <ActivityIndicator size="small" color={colors.accent} style={{ marginRight: spacing.s }} />
           <Text style={s.selBarText} numberOfLines={1}>
-            🎤 {dictation || "Слушаю — говори…"}
+            {voicePhase === "processing" ? "Готовлю текст…" : "🎤 " + (dictation || "Слушаю — говори…")}
           </Text>
-          <Pressable style={s.selBarBtn} onPress={toggleVoice}>
-            <Text style={{ color: "#fff", fontWeight: "700" }}>Готово</Text>
-          </Pressable>
         </View>
       )}
 
@@ -1373,15 +1451,39 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </Pressable>
       </Modal>
 
-      {/* превью скачанной картинки: тап — закрыть */}
-      <Modal visible={filePreview != null} transparent animationType="fade" onRequestClose={() => setFilePreview(null)}>
+      {/* превью картинки на весь экран: тап — закрыть */}
+      <Modal visible={filePreview != null} transparent animationType="fade" onRequestClose={closePreview}>
         <View style={s.overlay}>
           <Pressable
             style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.l }}
-            onPress={() => setFilePreview(null)}
+            onPress={closePreview}
           >
-            {filePreview ? (
-              <Image source={{ uri: filePreview }} style={{ width: "100%", maxHeight: "75%" }} resizeMode="contain" />
+            {filePreview && !previewErr ? (
+              <Image
+                source={{ uri: previewFile ?? filePreview }}
+                style={
+                  previewFit
+                    ? { width: previewFit.w, height: previewFit.h }
+                    : { width: "92%", maxHeight: Math.round(Dimensions.get("window").height * 0.7) }
+                }
+                resizeMode="contain"
+                onLoad={(e) => {
+                  const sw = e.nativeEvent.source?.width;
+                  const sh = e.nativeEvent.source?.height;
+                  if (sw && sh) setPreviewSize({ w: sw, h: sh });
+                }}
+                onError={(e) => {
+                  console.log("[img] preview load failed: " + (e.nativeEvent?.error ?? "?"));
+                  setPreviewErr(String(e.nativeEvent?.error ?? "не удалось загрузить"));
+                }}
+              />
+            ) : null}
+            {filePreview && previewErr ? (
+              <Text style={{ color: colors.danger, textAlign: "center" }}>
+                Картинка не загрузилась
+                {"\n"}
+                {previewErr}
+              </Text>
             ) : null}
             <Text style={{ color: colors.textDim, marginTop: spacing.m }}>тап по экрану — закрыть</Text>
           </Pressable>
@@ -1389,6 +1491,124 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       </Modal>
     </Animated.View>
   );
+}
+
+/** ————— мини-markdown для пузырей —————
+ * Инлайн: **жирный**, *курсив*, `код`, [ссылка](url).
+ * Блоки: ``` код (с языком), заголовки #..####.
+ * Весь инлайн — вложенные <Text> внутри одного selectable-Text: на Android
+ * это ОДИН TextView → нативное выделение зажатием продолжает работать.
+ */
+const MD_INLINE =
+  /(\*\*(?:[^*]|\*(?!\*))+?\*\*|__(?:[^_])+?__|\*(?:[^*\n])+?\*|(?<![A-Za-z0-9_])_(?:[^_\n])+?_(?![A-Za-z0-9])|`[^`\n]+`|\[[^\]\n]+\]\([^)\s]+\))/g;
+
+function renderMdInline(text: string, isUser: boolean, keyBase: string): React.ReactNode[] {
+  const out: React.ReactNode[] = [];
+  let last = 0;
+  let k = 0;
+  MD_INLINE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = MD_INLINE.exec(text)) !== null) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    const tok = m[0];
+    const key = keyBase + k++;
+    if ((tok.startsWith("**") || tok.startsWith("__")) && tok.endsWith(tok.slice(0, 2)) && tok.length > 4) {
+      out.push(<Text key={key} style={{ fontWeight: "700" }}>{tok.slice(2, -2)}</Text>);
+    } else if ((tok.startsWith("*") || tok.startsWith("_")) && tok.endsWith(tok[0]) && tok.length > 2) {
+      out.push(<Text key={key} style={{ fontStyle: "italic" }}>{tok.slice(1, -1)}</Text>);
+    } else if (tok.startsWith("`") && tok.endsWith("`") && tok.length > 2) {
+      out.push(
+        <Text key={key} style={[s.mdCode, isUser && { backgroundColor: "rgba(255,255,255,0.22)" }]}>
+          {tok.slice(1, -1)}
+        </Text>
+      );
+    } else if (tok.startsWith("[") && tok.includes("](")) {
+      const mm = tok.match(/^\[([^\]\n]+)\]\(([^)\s]+)\)$/);
+      if (mm && /^https?:\/\//i.test(mm[2])) {
+        out.push(
+          <Text
+            key={key}
+            style={{ color: isUser ? "#cfe0ff" : colors.accent, textDecorationLine: "underline" }}
+            onPress={() => Linking.openURL(mm[2]).catch(() => {})}
+          >
+            {mm[1]}
+          </Text>
+        );
+      } else {
+        out.push(tok);
+      }
+    } else {
+      out.push(tok);
+    }
+    last = m.index + tok.length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+/** текстовый фрагмент: заголовки (#..####) — жирные, остальное — инлайн-markdown */
+function renderMdText(part: string, isUser: boolean, keyBase: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  const lines = part.split("\n");
+  let plain: string[] = [];
+  const flush = (suffix: string) => {
+    if (plain.length === 0) return;
+    const txt = plain.join("\n");
+    plain = [];
+    if (!txt.trim()) return;
+    nodes.push(
+      <Text key={keyBase + suffix} selectable style={[s.bubbleText, isUser && { color: "#fff" }]}>
+        {renderMdInline(txt, isUser, keyBase + suffix + "-")}
+      </Text>
+    );
+  };
+  lines.forEach((line, li) => {
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) {
+      flush("p" + li);
+      const size = Math.max(14, 18 - h[1].length);
+      nodes.push(
+        <Text
+          key={keyBase + "h" + li}
+          selectable
+          style={[s.bubbleText, { fontWeight: "700", fontSize: size, marginTop: spacing.xs }, isUser && { color: "#fff" }]}
+        >
+          {renderMdInline(h[2], isUser, keyBase + "h" + li + "-")}
+        </Text>
+      );
+    } else {
+      plain.push(line);
+    }
+  });
+  flush("end");
+  return nodes;
+}
+
+/** весь текст: режем на блоки по ```, кодовые блоки — отдельным View */
+function renderMdBlocks(text: string, isUser: boolean, keyBase: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  const parts = text.split("```");
+  parts.forEach((part, idx) => {
+    if (idx % 2 === 0) {
+      nodes.push(...renderMdText(part, isUser, keyBase + "t" + idx + "-"));
+    } else {
+      let code = part;
+      let lang = "";
+      const nl = part.indexOf("\n");
+      const firstLine = (nl >= 0 ? part.slice(0, nl) : part).trim();
+      if (/^[a-zA-Z0-9+#.:-]{0,20}$/.test(firstLine)) {
+        lang = firstLine;
+        code = nl >= 0 ? part.slice(nl + 1) : "";
+      }
+      nodes.push(
+        <View key={keyBase + "c" + idx} style={[s.mdCodeBlock, isUser && { backgroundColor: "rgba(0,0,0,0.28)" }]}>
+          {lang ? <Text style={[s.mdCodeLang, isUser && { color: "rgba(255,255,255,0.6)" }]}>{lang}</Text> : null}
+          <Text style={[s.mdCodeText, isUser && { color: "#eef2fa" }]}>{code.replace(/\n$/, "")}</Text>
+        </View>
+      );
+    }
+  });
+  return nodes;
 }
 
 /** «⋯» рядом с пузырём: меню сообщения (копировать всё / откатить).
@@ -1434,6 +1654,37 @@ const s = StyleSheet.create({
   bubbleUser: { backgroundColor: colors.userBubble },
   bubbleBot: { backgroundColor: colors.surface2, borderColor: colors.border, borderWidth: 1 },
   bubbleText: { color: colors.text, fontSize: fontSize.m },
+  mdCode: {
+    fontFamily: "monospace",
+    fontSize: fontSize.s,
+    backgroundColor: colors.bg,
+    borderRadius: 4,
+    paddingHorizontal: 3,
+    paddingVertical: 1,
+    overflow: "hidden",
+  },
+  mdCodeBlock: {
+    backgroundColor: colors.bg,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.s,
+    paddingVertical: spacing.s,
+    marginTop: spacing.xs,
+    overflow: "hidden",
+  },
+  mdCodeLang: {
+    color: colors.textDim,
+    fontSize: 11,
+    fontWeight: "700",
+    marginBottom: 4,
+    textTransform: "uppercase",
+  },
+  mdCodeText: {
+    fontFamily: "monospace",
+    fontSize: fontSize.s,
+    color: colors.text,
+  },
   toolLine: {
     backgroundColor: colors.bg,
     borderRadius: 8,
@@ -1498,12 +1749,6 @@ const s = StyleSheet.create({
   },
   menuRowText: { color: colors.text, fontSize: fontSize.m, fontWeight: "600" },
   selBarText: { color: colors.textDim, fontSize: fontSize.s, flex: 1 },
-  selBarBtn: {
-    backgroundColor: colors.accent,
-    borderRadius: 8,
-    paddingHorizontal: spacing.m,
-    paddingVertical: 4,
-  },
   copiedBar: {
     alignItems: "center",
     paddingVertical: 2,

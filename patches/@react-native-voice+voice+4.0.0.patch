@@ -88,7 +88,7 @@ index 3f0c1ce..2a0caf6 100644
  
    }
 diff --git a/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/Voice.kt b/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/Voice.kt
-index 58ba07b..08895ce 100644
+index 58ba07b..711f6cc 100644
 --- a/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/Voice.kt
 +++ b/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/Voice.kt
 @@ -30,6 +30,11 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
@@ -112,7 +112,18 @@ index 58ba07b..08895ce 100644
  
      val mainHandler = Handler(reactContext.mainLooper)
      mainHandler.post {
-@@ -237,10 +244,24 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+@@ -161,7 +168,9 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+     val mainHandler = Handler(reactContext.mainLooper)
+     mainHandler.post {
+       try {
+-        if (speech != null) {
++        // stopListening зовём только если речь ещё идёт: на завершённом
++        // распознавателе Android шлёт onError(ERROR_CLIENT) — шторм в логах
++        if (speech != null && isRecognizing) {
+           speech!!.stopListening()
+         }
+         isRecognizing = false
+@@ -237,10 +246,24 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
      callback.invoke(isRecognizing)
    }
  
@@ -140,7 +151,7 @@ index 58ba07b..08895ce 100644
    }
  
    private fun getErrorText(errorCode: Int): String {
-@@ -288,16 +309,19 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+@@ -288,16 +311,19 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
    }
  
    override fun onEndOfSpeech() {
@@ -161,23 +172,47 @@ index 58ba07b..08895ce 100644
      val errorData = Arguments.createMap()
      errorData.putString("message", errorMessage)
      errorData.putString("code", java.lang.String.valueOf(errorMessage))
-@@ -315,6 +339,8 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+@@ -310,11 +336,18 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+   override fun onResults(results: Bundle?) {
+     val arr = Arguments.createArray()
+ 
+-    val matches = results!!.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+-    if (matches != null) {
++    // results может быть null/пустым (не распознал) — без results!! и с явной ошибкой,
++    // чтобы JS не ждал 4 секунды «пустоты», а сразу показал причину
++    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
++    if (matches != null && matches.isNotEmpty()) {
        for (result in matches) {
          arr.pushString(result)
        }
 +      lastResults = matches.firstOrNull() ?: ""
 +      lastError = null
++    } else {
++      lastResults = ""
++      lastError = String.format("%d/%s", SpeechRecognizer.ERROR_NO_MATCH, getErrorText(SpeechRecognizer.ERROR_NO_MATCH))
      }
      val event = Arguments.createMap()
      event.putArray("value", arr)
-@@ -330,6 +356,7 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+@@ -330,7 +363,9 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
        for (result in it) {
          arr.pushString(result)
        }
 +      lastResults = it.firstOrNull() ?: lastResults
      }
++    Log.d("ASR", "onPartialResults: " + (matches?.firstOrNull() ?: "<пусто>"))
  
      val event = Arguments.createMap()
+     event.putArray("value", arr)
+@@ -338,6 +373,8 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+   }
+ 
+   override fun onEvent(eventType: Int, params: Bundle?) {
+-    TODO("Not yet implemented")
++    // ВАЖНО: не TODO() — исключение здесь рвёт конвейер колбэков,
++    // и onResults после него может не прийти
++    Log.d("ASR", "onEvent($eventType)")
+   }
+ }
 diff --git a/node_modules/@react-native-voice/voice/android/src/newarch/VoiceSpec.kt b/node_modules/@react-native-voice/voice/android/src/newarch/VoiceSpec.kt
 index 3f0c1ce..2a0caf6 100644
 --- a/node_modules/@react-native-voice/voice/android/src/newarch/VoiceSpec.kt

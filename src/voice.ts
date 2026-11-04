@@ -16,6 +16,40 @@ type VoiceNative = {
   getSpeechResults: (cb: (results: string | null, error: string | null) => void) => void;
 };
 
+/**
+ * Таймаут-обёртка: если нативный колбэк по какой-то причине не пришёл
+ * (мост завис, модуль ушёл в фон), возвращаем дефолт вместо вечного await.
+ * Без этого voiceOn мог зависнуть навсегда — «отжать» микрофон было нельзя.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    let done = false;
+    const t = setTimeout(() => {
+      if (!done) {
+        done = true;
+        console.log("[voice] withTimeout: fallback после " + ms + "мс");
+        resolve(fallback);
+      }
+    }, ms);
+    p.then(
+      (v) => {
+        if (!done) {
+          done = true;
+          clearTimeout(t);
+          resolve(v);
+        }
+      },
+      () => {
+        if (!done) {
+          done = true;
+          clearTimeout(t);
+          resolve(fallback);
+        }
+      }
+    );
+  });
+}
+
 function getVoiceNative(): VoiceNative | null {
   try {
     const m: any = (globalThis as any).__turboModuleProxy
@@ -32,9 +66,16 @@ export const voiceNative = {
 
   /** Запустить распознавание. Отклоняет Promise, если стартовать не удалось. */
   start: (locale = "ru-RU"): Promise<void> =>
-    new Promise((resolve, reject) => {
+    new Promise<void>((resolve, reject) => {
       const m = getVoiceNative();
       if (!m) return reject(new Error("модуль голосового ввода недоступен"));
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error("микрофон не ответил (таймаут)"));
+        }
+      }, 8000);
       try {
         m.startSpeech(
           locale,
@@ -44,9 +85,18 @@ export const voiceNative = {
             EXTRA_PARTIAL_RESULTS: true,
             REQUEST_PERMISSIONS_AUTO: true,
           },
-          (e) => (e ? reject(new Error(e)) : resolve())
+          (e) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (e) reject(new Error(e));
+            else resolve();
+          }
         );
       } catch (e: any) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         reject(e);
       }
     }),
@@ -63,30 +113,38 @@ export const voiceNative = {
 
   /** Идёт ли распознавание на нативной стороне. */
   isRecognizing: (): Promise<boolean> =>
-    new Promise((resolve) => {
-      const m = getVoiceNative();
-      if (!m) return resolve(false);
-      try {
-        m.isRecognizing((v) => resolve(!!v));
-      } catch {
-        resolve(false);
-      }
-    }),
+    withTimeout(
+      new Promise<boolean>((resolve) => {
+        const m = getVoiceNative();
+        if (!m) return resolve(false);
+        try {
+          m.isRecognizing((v) => resolve(!!v));
+        } catch {
+          resolve(false);
+        }
+      }),
+      1500,
+      false
+    ),
 
   /**
    * Накопленный результат (последний partial или финальный) + последняя ошибка.
    * Пустая строка = ничего не распознано.
    */
   getSpeechResults: (): Promise<{ text: string; error: string }> =>
-    new Promise((resolve) => {
-      const m = getVoiceNative();
-      if (!m) return resolve({ text: "", error: "" });
-      try {
-        m.getSpeechResults((t, e) =>
-          resolve({ text: String(t ?? ""), error: String(e ?? "") })
-        );
-      } catch {
-        resolve({ text: "", error: "" });
-      }
-    }),
+    withTimeout(
+      new Promise((resolve) => {
+        const m = getVoiceNative();
+        if (!m) return resolve({ text: "", error: "" });
+        try {
+          m.getSpeechResults((t, e) =>
+            resolve({ text: String(t ?? ""), error: String(e ?? "") })
+          );
+        } catch {
+          resolve({ text: "", error: "" });
+        }
+      }),
+      1500,
+      { text: "", error: "" }
+    ),
 };
