@@ -52,4 +52,21 @@ export const AsyncStorage = {
   async saveUnread(server: ServerKind, ids: string[]): Promise<void> {
     await AsyncStorageInternal.setItem(PREFIX + "unread." + server, JSON.stringify(ids));
   },
+  /** черновик сообщения: текст на сессию, живёт на телефоне (выход из чата, рестарт приложения) */
+  async getDraft(server: ServerKind, sessionID: string): Promise<string> {
+    try {
+      return (await AsyncStorageInternal.getItem(PREFIX + "draft." + server + "." + sessionID)) ?? "";
+    } catch {
+      return "";
+    }
+  },
+  async saveDraft(server: ServerKind, sessionID: string, text: string): Promise<void> {
+    const key = PREFIX + "draft." + server + "." + sessionID;
+    try {
+      if (text.trim().length > 0) await AsyncStorageInternal.setItem(key, text);
+      else await AsyncStorageInternal.removeItem(key);
+    } catch {
+      /* черновик не критичен */
+    }
+  },
 };

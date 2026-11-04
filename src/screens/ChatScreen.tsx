@@ -22,6 +22,7 @@ import {
   Linking,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
+import * as DocumentPicker from "expo-document-picker";
 import { File, Paths, Directory } from "expo-file-system";
 import { voiceNative } from "../voice";
 import Clipboard from "@react-native-clipboard/clipboard";
@@ -163,6 +164,11 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   /** живой стрим ответа: что прилетело по SSE, но ещё не в снимке сервера. key — messageID */
   const [stream, setStream] = useState<{ [messageID: string]: StreamMsg }>({});
   const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // — черновик: текст переживает выход из чата и перезапуск приложения —
+  /** черновик ещё не восстановлен — до этого автосейв не трогает хранилище */
+  const draftReady = useRef(false);
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRef = useRef(input);
   // — голосовой ввод: тап по микрофону → дикт → вставляется в поле, без авто-отправки —
   const [voiceOn, setVoiceOn] = useState(false);
   const [dictation, setDictation] = useState("");
@@ -217,6 +223,44 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       setFavs(new Set([...device, ...fromServer]));
     })();
   }, [api, serverKind]);
+
+  // — черновик: текст переживает выход из чата и перезапуск приложения —
+  // восстановление при открытии сессии
+  useEffect(() => {
+    let alive = true;
+    AsyncStorage.getDraft(serverKind, sessionID)
+      .then((d) => {
+        if (!alive) return;
+        if (d) setInput(d);
+        draftReady.current = true;
+      })
+      .catch(() => {
+        draftReady.current = true; // ошибка хранилища — не блокируем ввод
+      });
+    return () => {
+      alive = false;
+    };
+  }, [serverKind, sessionID]);
+
+  // автосохранение с дебаунсом: непустой текст — сохранить, пустой — удалить черновик
+  useEffect(() => {
+    inputRef.current = input;
+    if (!draftReady.current) return; // ещё не восстановили — не затираем хранилище
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => {
+      AsyncStorage.saveDraft(serverKind, sessionID, input);
+    }, 400);
+    return () => {
+      if (draftTimer.current) clearTimeout(draftTimer.current);
+    };
+  }, [input, serverKind, sessionID]);
+
+  // при выходе из чата — сохранить актуальный текст (дебаунс мог не сработать)
+  useEffect(() => {
+    return () => {
+      if (draftReady.current) AsyncStorage.saveDraft(serverKind, sessionID, inputRef.current);
+    };
+  }, [serverKind, sessionID]);
 
   const toggleFav = async (m: ModelRow) => {
     const k = modelKey(m);
@@ -656,6 +700,29 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
           uri: a.uri,
           mime: a.mimeType ?? "image/jpeg",
           filename: a.fileName ?? `photo-${Date.now()}.jpg`,
+        },
+      ]);
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    }
+  };
+
+  /** выбор файла любой природы (документы, архивы, код…): системный пикер документов */
+  const pickDocument = async () => {
+    setError(null);
+    try {
+      const res = await DocumentPicker.getDocumentAsync({
+        copyToCacheDirectory: true,
+        type: "*/*",
+      });
+      if (res.canceled || !res.assets || res.assets.length === 0) return;
+      const a = res.assets[0];
+      setAttachments((prev) => [
+        ...prev,
+        {
+          uri: a.uri,
+          mime: a.mimeType ?? "application/octet-stream",
+          filename: a.name ?? `file-${Date.now()}`,
         },
       ]);
     } catch (e: any) {
@@ -1123,31 +1190,38 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </View>
       )}
 
-      {/* инфо-строка: модель / агент / статистика / файлы */}
+      {/* инфо-строка: селекторы (модель/агент/файлы) — скроллятся, токены — всегда видны справа */}
       <View style={s.infoRow}>
-        <Pressable style={s.chip} onPress={() => { loadModels(); setSheet("model"); }}>
-          <View style={s.chipRow}>
-            <Ionicons name="hardware-chip-outline" size={14} color={colors.textDim} />
-            <Text style={s.chipText} numberOfLines={1}>{modelLabel}</Text>
-            <Ionicons name="chevron-down" size={12} color={colors.textDim} />
-          </View>
-        </Pressable>
-        <Pressable style={s.chip} onPress={() => { loadAgents(); setSheet("agent"); }}>
-          <View style={s.chipRow}>
-            <Ionicons name="person-circle-outline" size={14} color={colors.textDim} />
-            <Text style={s.chipText} numberOfLines={1}>{agentLabel}</Text>
-            <Ionicons name="chevron-down" size={12} color={colors.textDim} />
-          </View>
-        </Pressable>
-        {serverKind === "opencode" && (
-          <Pressable style={s.chip} onPress={openFiles}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={{ flex: 1 }}
+          contentContainerStyle={{ gap: spacing.s }}
+        >
+          <Pressable style={[s.chip, s.chipModel]} onPress={() => { loadModels(); setSheet("model"); }}>
             <View style={s.chipRow}>
-              <Ionicons name="folder-outline" size={14} color={colors.textDim} />
-              <Text style={s.chipText} numberOfLines={1}>Файлы</Text>
+              <Ionicons name="hardware-chip-outline" size={14} color={colors.textDim} />
+              <Text style={[s.chipText, { flexShrink: 1 }]} numberOfLines={1}>{modelLabel}</Text>
+              <Ionicons name="chevron-down" size={12} color={colors.textDim} />
             </View>
           </Pressable>
-        )}
-        <Pressable style={[s.chip, { marginLeft: "auto" }]} onPress={() => { loadContext(); setSheet("ctx"); }}>
+          <Pressable style={s.chip} onPress={() => { loadAgents(); setSheet("agent"); }}>
+            <View style={s.chipRow}>
+              <Ionicons name="person-circle-outline" size={14} color={colors.textDim} />
+              <Text style={s.chipText} numberOfLines={1}>{agentLabel}</Text>
+              <Ionicons name="chevron-down" size={12} color={colors.textDim} />
+            </View>
+          </Pressable>
+          {serverKind === "opencode" && (
+            <Pressable style={s.chip} onPress={openFiles}>
+              <View style={s.chipRow}>
+                <Ionicons name="folder-outline" size={14} color={colors.textDim} />
+                <Text style={s.chipText} numberOfLines={1}>Файлы</Text>
+              </View>
+            </Pressable>
+          )}
+        </ScrollView>
+        <Pressable style={[s.chip, s.chipFixed]} onPress={() => { loadContext(); setSheet("ctx"); }}>
           <View style={s.chipRow}>
             <Ionicons name="stats-chart-outline" size={14} color={colors.textDim} />
             <Text style={s.chipText} numberOfLines={1}>{tokLabel}</Text>
@@ -1162,12 +1236,6 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
           <Text style={s.statusText} numberOfLines={1}>
             {statusInfo.text}{dots}{busySec > 0 ? ` · ${busySec}с` : ""}
           </Text>
-          <Pressable style={s.stopSmall} onPress={stop}>
-            <View style={s.stopRow}>
-              <Ionicons name="stop" size={12} color="#fff" />
-              <Text style={{ color: "#fff", fontSize: fontSize.s, fontWeight: "700" }}>Стоп</Text>
-            </View>
-          </Pressable>
         </View>
       )}
 
@@ -1589,27 +1657,60 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
 
       {attachments.length > 0 && (
         <ScrollView horizontal style={s.attachRow} contentContainerStyle={{ gap: spacing.s }}>
-          {attachments.map((a, i) => (
-            <View key={a.uri + i} style={s.attachThumbWrap}>
-              <Image source={{ uri: a.uri }} style={s.attachThumb} />
-              <Pressable
-                style={s.attachDel}
-                hitSlop={8}
-                onPress={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
-              >
-                <Ionicons name="close" size={12} color="#fff" />
-              </Pressable>
-            </View>
-          ))}
+          {attachments.map((a, i) =>
+            a.mime.startsWith("image/") ? (
+              <View key={a.uri + i} style={s.attachThumbWrap}>
+                <Image source={{ uri: a.uri }} style={s.attachThumb} />
+                <Pressable
+                  style={s.attachDel}
+                  hitSlop={8}
+                  onPress={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
+                >
+                  <Ionicons name="close" size={12} color="#fff" />
+                </Pressable>
+              </View>
+            ) : (
+              <View key={a.uri + i} style={s.fileChipWrap}>
+                <View style={s.fileChip}>
+                  <Ionicons name="document-text-outline" size={18} color={colors.accent} />
+                  <Text style={s.fileChipName} numberOfLines={1}>
+                    {a.filename}
+                  </Text>
+                </View>
+                <Pressable
+                  style={s.attachDel}
+                  hitSlop={8}
+                  onPress={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
+                >
+                  <Ionicons name="close" size={12} color="#fff" />
+                </Pressable>
+              </View>
+            )
+          )}
         </ScrollView>
       )}
 
       <Modal visible={attachMenu} transparent animationType="fade" onRequestClose={() => setAttachMenu(false)}>
         <Pressable style={s.overlay} onPress={() => setAttachMenu(false)}>
           <View style={s.modal}>
-            <Text style={s.sheetTitle}>Вложение</Text>
+            <Text style={s.sheetTitle}>Прикрепить файл</Text>
             <Pressable
               style={[s.card, { marginHorizontal: 0 }]}
+              onPress={() => {
+                setAttachMenu(false);
+                pickDocument();
+              }}
+            >
+              <View style={s.attachMenuRow}>
+                <Ionicons name="document-text-outline" size={20} color={colors.accent} />
+                <View style={{ flex: 1 }}>
+                  <Text style={s.cardTitle}>Файл</Text>
+                  <Text style={s.cardDir}>Документ, архив, код — любой файл с телефона</Text>
+                </View>
+              </View>
+            </Pressable>
+            <Pressable
+              style={[s.card, { marginHorizontal: 0, marginTop: spacing.s }]}
               onPress={() => {
                 setAttachMenu(false);
                 pickImage(false);
@@ -1947,12 +2048,6 @@ const s = StyleSheet.create({
     borderWidth: 1,
   },
   statusText: { color: colors.text, fontSize: fontSize.s, flex: 1 },
-  stopSmall: {
-    backgroundColor: colors.danger,
-    borderRadius: 8,
-    paddingHorizontal: spacing.m,
-    paddingVertical: 4,
-  },
   stopBtn: {
     backgroundColor: colors.danger,
     borderRadius: 8,
@@ -2000,6 +2095,20 @@ const s = StyleSheet.create({
   attachBtn: { paddingHorizontal: spacing.s, paddingBottom: 8 },
   attachRow: { maxHeight: 76, paddingHorizontal: spacing.l, paddingBottom: spacing.s },
   attachThumbWrap: { position: "relative" },
+  fileChipWrap: { position: "relative", alignSelf: "center" },
+  fileChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: colors.surface2,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: spacing.s,
+    paddingVertical: 8,
+    maxWidth: 200,
+  },
+  fileChipName: { color: colors.text, fontSize: fontSize.s, flexShrink: 1 },
   attachThumb: { width: 64, height: 64, borderRadius: 8 },
   attachDel: {
     position: "absolute",
@@ -2170,6 +2279,8 @@ const s = StyleSheet.create({
   backRow: { flexDirection: "row", alignItems: "center", gap: 2 },
   stopRow: { flexDirection: "row", alignItems: "center", gap: 5 },
   chipRow: { flexDirection: "row", alignItems: "center", gap: 5 },
+  chipModel: { maxWidth: 160 },
+  chipFixed: { flexShrink: 0 },
   toolLineRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   copiedRow: { flexDirection: "row", alignItems: "center", gap: 5 },
   cardTitleRow: { flexDirection: "row", alignItems: "center", gap: 6 },

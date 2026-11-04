@@ -1,6 +1,6 @@
 {
   "name": "opencode-mobile",
-  "version": "1.6.6",
+  "version": "1.6.7",
   "main": "index.ts",
   "dependencies": {
     "@expo/vector-icons": "^15.0.2",
@@ -9,6 +9,7 @@
     "@react-native-voice/voice": "npm:yet-another-react-native-voice@4.0.0",
     "expo": "~58.0.14",
     "expo-constants": "58.0.10",
+    "expo-document-picker": "~58.0.4",
     "expo-file-system": "58.0.13",
     "expo-image-picker": "58.0.10",
     "expo-intent-launcher": "58.0.3",
