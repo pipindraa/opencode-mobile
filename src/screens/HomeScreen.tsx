@@ -288,7 +288,6 @@ export default function HomeScreen({ api, serverKind, onOpen, onSettings, unread
                 {status}
                 <View style={{ flex: 1 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.xs }}>
-                    {isFav && <Ionicons name="star" size={13} color="#f5b73e" />}
                     <Text style={[s.cardTitle, { flex: 1 }]} numberOfLines={1}>
                       {titles?.[it.id] ?? it.title}
                     </Text>
