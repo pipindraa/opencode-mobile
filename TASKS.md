@@ -308,5 +308,68 @@
       при прокрутке вверх |y| растёт (знак платформенный — берём abs).
       onScroll → setState только при переходе порога (awayRef), throttle 100мс.
 - [x] tsc 0 ошибок; versionName 1.6.3 / versionCode 10603 / app.json 1.6.3
-- [ ] Сборка 10603 → APK → релиз v1.6.3 на GitHub → владелец ставит по кнопке
+- [x] Сборка 10603: пересобрана после правки scrollToOffset (первый бандл
+      был ДО правки — по таймстампам 16:11/16:12); телефон сам обновился
+      (lastUpdateTime 16:22) — expo run:android поставил APK на подключённый
+      RFCRB07TANF. Отдельный релиз v1.6.3 на GitHub не публиковался (см. v1.6.4).
+
+## v1.6.4 (04.11) — голос: ИСТИННЫЙ root cause (два экземпляра Voice)
+На телефоне 1.6.3, logcat подтверждал: распознаватель РАБОТАЕТ
+(onBeginningOfSpeech → onEndOfSpeech → onResults). v1.6.2 починил
+«зависание», но текст всё равно не доходил.
+
+Root cause (находка чтением нативного кода):
+- VoicePackage всегда создаёт VoiceModule. У VoiceSpec (newarch) СВОЙ
+  `private val voice = Voice(context)`, и у VoiceModule СВОЙ — ДВА
+  экземпляра распознавателя.
+- startSpeech/stopSpeech/isRecognizing переопределены в VoiceModule →
+  распознавание идёт в экземпляре #2 (его lastResults получает текст из
+  onResults/onPartialResults).
+- getSpeechResults в VoiceModule НЕ был переопределён → вызов падал в
+  VoiceSpec.getSpeechResults → читал lastResults экземпляра #1 = ВСЕГДА "".
+  JS-поллинг получал пусто → «голос не работает».
+ФИКС (VoiceModule.kt, патч): override getSpeechResults → голос.
+getSpeechResults(callback) — все методы читают один и тот же экземпляр, где
+идёт распознавание. Плюс Log.d в Voice.getSpeechResults (textLen/err) для
+logcat-проверки.
+- [x] versionName 1.6.4 / versionCode 10604 / app.json 1.6.4
+- [x] Сборка 10604 собрана и САМА встала на телефон (подключён по USB);
+владелец подтвердил: «голосовой ввод работает».
+- [ ] Релиз v1.6.4 на GitHub + APK (заодно, т.к. на телефоне уже 10604)
+
+## v1.6.5 (04.11) — непрерывная диктовка (пауза не рвёт текст)
+Владелец: голос РАБОТАЕТ, но «когда перестаю разговаривать — он
+автоматически сбрасывается». Причина: нативная сессия SpeechRecognizer
+заканчивается на тише ~2с, JS считывал текст одного «куска» и завершался.
+
+ФИКС (только JS, нативка не менялась):
+- voice.ts: в start() добавлены EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS=3000
+  и EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS=3000 —
+  нативная сессия переживает паузу до 3с (Voice.kt читает их getDouble).
+- ChatScreen (useEffect голоса, полный rewrite) — непрерывный режим:
+  - accum: распознанное копится ЧЕРЕЗ сессии (нативка сбрасывает lastResults
+    на каждом start — держим накопленное на стороне JS).
+  - onSessionEnd: сборка результата (поллинг 300мс до 2.5с; onResults
+    приходит ~80мс ПОСЛЕ onEndOfSpeech) → текст докидывается в accum.
+  - «No match»/«No speech input» (коды 8/11) = тишина, а не ошибка.
+  - пауза ≤ 2с от последнего текста (VOICE_SILENCE_GRACE_MS < нативных 3с)
+    → АВТО-РЕСТАРТ voiceNative.start("ru-RU") — диктовка идёт дальше.
+    Неудача рестарта → финал с ошибкой (если за это время подтянулась
+    новая сессия — не убиваем её: isRecognizing guard).
+  - финал (текст в поле) — на ~6с после последнего слова (первая «пустая»
+    сессия), раньше — только по ⏹ (stoppingRef → сразу onSessionEnd)
+    или по реальной ошибке.
+  - живая строка = accum + « » + partial текущей сессии.
+  - tick 400мс (было 700); watchdog 45с = «НЕТ ПРОГРЕССА» (сбрасывается на
+    каждом конце сессии и на каждом новом partial) — длинную диктовку
+    больше не убивает; emptyStreak<3 — от зацикливания пустых сессий;
+    старт-грейс 2с (сразу после (ре)старта isRecognizing может быть false).
+- Попутно: карта voiceErrorText приведена к реальным SpeechRecognizer.ERROR_*
+  (была сдвинута: 6=сеть, 7=таймаут сети, 8=no match, 11=молчание).
+- [x] tsc 0 ошибок; versionName 1.6.5 / versionCode 10605 / app.json 1.6.5
+- [ ] Сборка 10605 (gradlew assembleRelease — БЕЗ expo run:android: телефон
+      отключён, иначе встанет на эмулятор caltrack) → APK
+- [ ] Релиз v1.6.5 на GitHub + APK
+- [ ] Владелец: паузы <3с не рвут текст; ~6с тишины → текст в поле;
+      ⏹ → всё накопленное в поле; длинная диктовка с паузами не теряется
 

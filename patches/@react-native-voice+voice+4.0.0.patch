@@ -88,7 +88,7 @@ index 3f0c1ce..2a0caf6 100644
  
    }
 diff --git a/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/Voice.kt b/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/Voice.kt
-index 58ba07b..711f6cc 100644
+index 58ba07b..dde37ff 100644
 --- a/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/Voice.kt
 +++ b/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/Voice.kt
 @@ -30,6 +30,11 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
@@ -123,7 +123,7 @@ index 58ba07b..711f6cc 100644
            speech!!.stopListening()
          }
          isRecognizing = false
-@@ -237,10 +246,24 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+@@ -237,10 +246,25 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
      callback.invoke(isRecognizing)
    }
  
@@ -132,6 +132,7 @@ index 58ba07b..711f6cc 100644
 +   * Поллинг-фолбэк для bridgeless: события не доходят, JS сам опрашивает.
 +   */
 +  fun getSpeechResults(callback: Callback) {
++    Log.d("ASR", "getSpeechResults: textLen=" + lastResults.length + " err=" + lastError)
 +    callback.invoke(lastResults, lastError)
 +  }
 +
@@ -151,7 +152,7 @@ index 58ba07b..711f6cc 100644
    }
  
    private fun getErrorText(errorCode: Int): String {
-@@ -288,16 +311,19 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+@@ -288,16 +312,19 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
    }
  
    override fun onEndOfSpeech() {
@@ -172,7 +173,7 @@ index 58ba07b..711f6cc 100644
      val errorData = Arguments.createMap()
      errorData.putString("message", errorMessage)
      errorData.putString("code", java.lang.String.valueOf(errorMessage))
-@@ -310,11 +336,18 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+@@ -310,11 +337,18 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
    override fun onResults(results: Bundle?) {
      val arr = Arguments.createArray()
  
@@ -193,7 +194,7 @@ index 58ba07b..711f6cc 100644
      }
      val event = Arguments.createMap()
      event.putArray("value", arr)
-@@ -330,7 +363,9 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+@@ -330,7 +364,9 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
        for (result in it) {
          arr.pushString(result)
        }
@@ -203,7 +204,7 @@ index 58ba07b..711f6cc 100644
  
      val event = Arguments.createMap()
      event.putArray("value", arr)
-@@ -338,6 +373,8 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
+@@ -338,6 +374,8 @@ class Voice (context:ReactApplicationContext):RecognitionListener {
    }
  
    override fun onEvent(eventType: Int, params: Bundle?) {
@@ -213,6 +214,25 @@ index 58ba07b..711f6cc 100644
 +    Log.d("ASR", "onEvent($eventType)")
    }
  }
+diff --git a/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/VoiceModule.kt b/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/VoiceModule.kt
+index 65da565..05a4f3a 100644
+--- a/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/VoiceModule.kt
++++ b/node_modules/@react-native-voice/voice/android/src/main/java/com/wenkesj/voice/VoiceModule.kt
+@@ -45,6 +45,14 @@ class VoiceModule internal constructor(context: ReactApplicationContext) :
+     voice.isRecognizing(callback)
+   }
+ 
++  // ВАЖНО: override обязательно — без него вызов упадёт в VoiceSpec,
++  // где СВОЙ отдельный экземпляр Voice, и getSpeechResults всегда читал
++  // пустой lastResults (распознавание идёт в этом, втором экземпляре).
++  @ReactMethod
++  override fun getSpeechResults(callback: Callback) {
++    voice.getSpeechResults(callback)
++  }
++
+   override fun addListener(eventType: String) {
+ 
+   }
 diff --git a/node_modules/@react-native-voice/voice/android/src/newarch/VoiceSpec.kt b/node_modules/@react-native-voice/voice/android/src/newarch/VoiceSpec.kt
 index 3f0c1ce..2a0caf6 100644
 --- a/node_modules/@react-native-voice/voice/android/src/newarch/VoiceSpec.kt

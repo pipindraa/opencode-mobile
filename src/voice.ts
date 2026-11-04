@@ -83,6 +83,11 @@ export const voiceNative = {
             EXTRA_LANGUAGE_MODEL: "LANGUAGE_MODEL_FREE_FORM",
             EXTRA_MAX_RESULTS: 5,
             EXTRA_PARTIAL_RESULTS: true,
+            // Непрерывная диктовка: пауза до 3с не должна завершать нативную
+            // сессию (штатный тайм-аут движка короче). Длинная тишина
+            // обрабатывается JS-стороной: авто-рестарт сессии (ChatScreen).
+            EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 3000,
+            EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 3000,
             REQUEST_PERMISSIONS_AUTO: true,
           },
           (e) => {

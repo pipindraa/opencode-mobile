@@ -61,16 +61,25 @@ function voiceErrorText(e: string): string {
   const code = String(e).split("/")[0];
   const map: Record<string, string> = {
     "1": "ошибка аудио (микрофон)",
-    "3": "остановлено — слов не распознал",
-    "6": "нет разрешения на микрофон",
-    "7": "сетевая ошибка (распознаванию нужен интернет)",
-    "8": "таймаут сети",
-    "9": "не расслышал — попробуй ещё раз",
-    "10": "распознаватель занят — попробуй ещё раз",
-    "11": "таймаут речи (молчание)",
+    "3": "внутренняя ошибка распознавания",
+    "5": "нет разрешения на микрофон",
+    "6": "нет сети — распознаванию нужен интернет",
+    "7": "таймаут сети",
+    "8": "не расслышал — попробуй ещё раз",
+    "9": "распознаватель занят — попробуй ещё раз",
+    "10": "ошибка сервера распознавания",
+    "11": "молчание — ничего не распознал",
   };
   return map[code] ?? String(e);
 }
+
+/**
+ * Непрерывная диктовка: пауза от последнего распознанного текста до этого
+ * порога (мс) НЕ завершает диктовку — JS перезапускает нативную сессию.
+ * Нативная тише-терпимость 3000мс (voice.ts); GRACE < 3000 → финальное
+ * решение (текст в поле) — после ПЕРВОЙ «пустой» сессии, ~6с после слова.
+ */
+const VOICE_SILENCE_GRACE_MS = 2000;
 
 type ModelRow = { id: string; providerID: string; name: string; variants: string[] };
 
@@ -707,12 +716,15 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     }
   };
 
-  // ————————————————— голосовой ввод —————————————————
-  // тап 🎤 → диктуем → текст вставляется в поле (без авто-отправки).
-  // Второй тап по той же кнопке (⏹) — стоп. RN 0.88 bridgeless: события
-  // модуля не доходят, JS опрашивает isRecognizing() + getSpeechResults().
-  // Все нативные вызовы обёрнуты таймаутами (voice.ts) + watchdog ниже —
-  // режим диктовки не должен зависнуть «намертво».
+  // ————————————————— голосовой ввод (непрерывный) —————————————————
+  // тап 🎤 → диктуем → текст копится и вставляется в поле (без авто-отправки).
+  // Паузы НЕ убивают диктовку: нативная сессия кончается на тише 3с
+  // (voice.ts), JS добирает её результат, добавляет в накопленное и
+  // перезапускает сессию. Текст в поле — на ~6с после последнего слова,
+  // раньше — только по ⏹ (второй тап) или по реальной ошибке.
+  // RN 0.88 bridgeless: события модуля не доходят, JS опрашивает
+  // isRecognizing() + getSpeechResults(). Все нативные вызовы обёрнуты
+  // таймаутами (voice.ts) + watchdog — диктовка не зависнет «намертво».
   const stoppingRef = useRef(false);
   const voiceStartRef = useRef(0);
 
@@ -758,17 +770,27 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   useEffect(() => {
     if (!voiceOn) return;
     let finished = false;
+    let busy = false; // onSessionEnd крутится — не входить повторно
     let collectTimer: ReturnType<typeof setTimeout> | null = null;
-    let voiceEndAt = 0;
+    let accum = ""; // распознанное по сессиям (нативка сбрасывает его при рестарте)
+    let lastTextAt = 0; // когда пришёл последний реальный текст
+    let lastStartAt = Date.now(); // старт (ре)сессии — grace-окно
+    let emptyStreak = 0; // пустых сессий подряд (страховка от зацикливания)
+
+    // "No match" (пустой результат) и "No speech input" (молчание) — это не
+    // ошибка, а тишина: сессию перезапускаем или спокойно завершаем.
+    const isSilenceError = (e: string) =>
+      e.includes("No match") || e.includes("No speech input");
 
     /**
-     * Финал: текст → в поле; пусто + ошибка → показываем причину.
+     * Финал: накопленный accum → в поле, натив глушим, состояние сбрасываем.
      */
-    const finishVoice = (text: string, error: string) => {
+    const finishVoice = (error: string) => {
       if (finished) return;
       finished = true;
       if (collectTimer) clearTimeout(collectTimer);
-      const t = text.trim();
+      const t = accum.trim();
+      voiceNative.stop();
       setVoiceOn(false);
       setVoicePhase("listening");
       setDictation("");
@@ -786,52 +808,100 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     };
 
     /**
-     * Android шлёт onResults ПОСЛЕ onEndOfSpeech — опрашиваем getSpeechResults
-     * каждые 400мс. Ручной стоп (пользователь ждёт) — окно короче: 2.5с.
+     * Нативная сессия закончилась (тишина / ручной стоп / ошибка).
+     * onResults приходит ~80мс ПОСЛЕ onEndOfSpeech — опрашиваем до 2.5с,
+     * докидываем текст в accum и решаем: рестарт сессии (диктовка идёт
+     * дальше) или финал.
      */
-    const collect = async () => {
-      if (finished) return;
-      const { text, error } = await voiceNative.getSpeechResults();
-      if (finished) return;
-      if (text.trim()) return finishVoice(text, "");
-      // спонтанный конец с ошибкой — завершаем сразу, не ждём финал
-      if (error && !stoppingRef.current) return finishVoice("", error);
-      const window = stoppingRef.current ? 2500 : 4000;
-      if (Date.now() - voiceEndAt > window) return finishVoice("", error || "");
-      collectTimer = setTimeout(collect, 400);
+    const onSessionEnd = () => {
+      if (finished || busy) return;
+      busy = true;
+      let waited = 0;
+      const decide = () => {
+        voiceStartRef.current = Date.now(); // watchdog: была активность
+        if (stoppingRef.current) return finishVoice("");
+        // пауза короче грейса → диктовка продолжается: перезапускаем сессию
+        if (Date.now() - lastTextAt <= VOICE_SILENCE_GRACE_MS && emptyStreak < 3) {
+          emptyStreak++;
+          busy = false;
+          lastStartAt = Date.now();
+          console.log("[voice] авто-рестарт (пауза, продолжаем)");
+          voiceNative
+            .start("ru-RU")
+            .then(() => console.log("[voice] авто-рестарт ок"))
+            .catch((e: any) => {
+              // если за время сбоев подтянулась новая сессия — не убиваем её
+              voiceNative.isRecognizing().then((r) => {
+                if (r) return;
+                console.log("[voice] авто-рестарт не удался: " + (e?.message ?? e));
+                finishVoice(e?.message ?? String(e));
+              });
+            });
+          return;
+        }
+        return finishVoice("");
+      };
+      const collect = async () => {
+        if (finished) return;
+        const { text, error } = await voiceNative.getSpeechResults();
+        if (finished) return;
+        const t = text.trim();
+        if (t) {
+          accum = accum ? accum + " " + t : t;
+          lastTextAt = Date.now();
+          emptyStreak = 0;
+          console.log("[voice] сессия +" + t.length + " симв., accum=" + accum.length);
+        }
+        const err = error || "";
+        const realError = err !== "" && !isSilenceError(err);
+        // сессия точно закончилась без текста (ошибка тишины уже стоит) —
+        // ждать дольше бессмысленно
+        const silenceDone = t === "" && err !== "" && isSilenceError(err);
+        if (t || realError || silenceDone || waited >= 2500) {
+          if (realError) return finishVoice(err);
+          return decide();
+        }
+        waited += 300;
+        collectTimer = setTimeout(collect, 300);
+      };
+      collect();
     };
 
     const tick = async () => {
-      if (finished) return;
-      // watchdog: диктовка висит больше 45с — что-то сломалось,
-      // вытаскиваем из мёртвого состояния (stop + ошибка)
+      if (finished || busy) return;
+      // watchdog: 45с БЕЗ прогресса (нет текста, сессии не кончаются) —
+      // что-то сломалось, вытаскиваем из мёртвого состояния
       if (voiceStartRef.current && Date.now() - voiceStartRef.current > 45000) {
         voiceNative.stop();
-        return finishVoice("", "watchdog");
+        return finishVoice("watchdog");
       }
-      // после ручного стопа не ждём isRecognizing — сразу собираем результат
-      if (stoppingRef.current && !voiceEndAt) {
-        voiceEndAt = Date.now();
-        collectTimer = setTimeout(collect, 400);
+      // ручной стоп — не ждём isRecognizing, сразу собираем результат
+      if (stoppingRef.current) {
+        onSessionEnd();
         return;
       }
       const recognizing = await voiceNative.isRecognizing();
-      if (finished) return;
+      if (finished || busy) return;
       if (recognizing) {
-        // живая строка: последний partial с опозданием ~0.5-0.7с
+        // живая строка: накопленное + partial текущей сессии
         const { text } = await voiceNative.getSpeechResults();
-        if (text && text !== dictRef.current) {
-          dictRef.current = text;
-          setDictation(text);
+        if (finished) return;
+        const partial = (text || "").trim();
+        const live = accum ? accum + (partial ? " " + partial : "") : partial;
+        if (live && live !== dictRef.current) {
+          dictRef.current = live;
+          setDictation(live);
+          voiceStartRef.current = Date.now(); // watchdog: есть прогресс
         }
         return;
       }
-      // речь кончилась (тишина / ошибка / ручной стоп)
-      voiceEndAt = Date.now();
-      collectTimer = setTimeout(collect, 400);
+      // грайс: сразу после (ре)старта isRecognizing может быть false, пока
+      // распознаватель поднимается — не считаем сессию «закончившейся»
+      if (Date.now() - lastStartAt < 2000) return;
+      onSessionEnd();
     };
 
-    const id = setInterval(tick, 700);
+    const id = setInterval(tick, 400);
     return () => {
       finished = true;
       clearInterval(id);
