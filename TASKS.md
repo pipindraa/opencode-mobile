@@ -447,5 +447,7 @@ logcat-проверки.
 - [x] versionName 1.6.7 / versionCode 10607 / app.json 1.6.7
 - [x] Сборка 10607 (пересборка после всех правок, бандл свежий — 814 модулей)
   → APK: versionCode=10607 versionName=1.6.7 (aapt); releases/app-release-1.6.7.apk
-- [ ] Релиз v1.6.7 на GitHub; владелец ставит через «Проверить обновления»
+- [x] Релиз v1.6.7 на GitHub + APK (app-release-1.6.7.apk, Latest);
+  коммит c6db47e в origin/master
+- [ ] Владелец: ставит 1.6.7 через «Проверить обновления», проверяет
 
