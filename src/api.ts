@@ -318,14 +318,59 @@ class OpenCodeApi {
     return out;
   }
 
-  async sessions(): Promise<{ id: string; title: string; directory: string; timeCreated: number }[]> {
-    const data = await this.req("/api/session");
+  async sessions(archived = false, limit = 200): Promise<{ id: string; title: string; directory: string; timeCreated: number; timeUpdated: number }[]> {
+    const qs = `?archived=${archived ? "true" : "false"}&limit=${limit}`;
+    const data = await this.req(`/api/session${qs}`);
     return extractList(data).map((s: any) => ({
       id: String(s?.id ?? s?.sessionID ?? ""),
       title: String(s?.title ?? s?.name ?? "без названия"),
       directory: String(s?.directory ?? s?.location?.directory ?? ""),
       timeCreated: Number(s?.time?.created ?? 0),
+      timeUpdated: Number(s?.time?.updated ?? s?.time?.created ?? 0),
     }));
+  }
+
+  /** переименовать сессию (PATCH /api/session/{id} — v2; у форка эндпоинта нет) */
+  async renameSession(sessionID: string, title: string): Promise<void> {
+    if (this.omni) throw new ApiError("У Omnirush нет переименования сессий");
+    await this.req(`/api/session/${sessionID}`, { method: "PATCH", json: { title } });
+  }
+
+  /** в архив / из архива (серверное поле archived, v2) */
+  async setArchived(sessionID: string, archived: boolean): Promise<void> {
+    if (this.omni) throw new ApiError("У Omnirush нет архива сессий");
+    await this.req(`/api/session/${sessionID}`, { method: "PATCH", json: { archived } });
+  }
+
+  /** удалить сессию (v2: DELETE /api/session/{id} → 204) */
+  async deleteSession(sessionID: string): Promise<void> {
+    if (this.omni) throw new ApiError("У Omnirush нет удаления сессий");
+    await this.req(`/api/session/${sessionID}`, { method: "DELETE", json: {} });
+  }
+
+  /**
+   * Агрегированная статика за период (v2: /api/experimental/session/stats).
+   * from/to — мс. Возвращает tokens {input,output,reasoning,cache}, cost,
+   * activity[{date,steps}], models[{model,steps,tokens,cost}], сессии/промпты.
+   * У форка эндпоинта нет → null (экран считает сам по сообщениям).
+   */
+  async sessionStats(fromMs: number, toMs: number): Promise<any | null> {
+    if (this.omni) return null;
+    const res: any = await this.req(`/api/experimental/session/stats?from=${fromMs}&to=${toMs}`);
+    return res?.data ?? res;
+  }
+
+  /**
+   * Сырые сообщения сессии (для статистики): нужен tokens/cost/time у каждого.
+   * Форма: {id, time:{created}, type, content[], tokens:{input,output,reasoning,cache:{read,write}}, cost}
+   * (у форка — {info:{...}, parts:[...]}; парсер defensive).
+   */
+  async rawMessages(sessionID: string, limit = 500): Promise<any[]> {
+    const path = this.omni
+      ? `/session/${sessionID}/message?limit=${limit}`
+      : `/api/session/${sessionID}/message?limit=${limit}`;
+    const data = await this.req(path);
+    return extractList(data);
   }
 
   async sessionsActive(): Promise<string[]> {

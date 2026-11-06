@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { StatusBar } from "expo-status-bar";
-import { Platform, Pressable, StatusBar as RNStatusBar, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, StatusBar as RNStatusBar, AppState, StyleSheet, Text, View } from "react-native";
 import { AsyncStorage } from "./src/store";
 import { OpenCodeApi, ServerKind, basicAuthHeader } from "./src/api";
 import { events, BusEvent } from "./src/events";
@@ -8,9 +8,11 @@ import { initNotifications, notify, onTapped } from "./src/notifications";
 import SetupScreen from "./src/screens/SetupScreen";
 import HomeScreen from "./src/screens/HomeScreen";
 import ChatScreen from "./src/screens/ChatScreen";
+import StatsScreen from "./src/screens/StatsScreen";
+import { monitor } from "./src/monitor";
 import { colors, spacing, fontSize } from "./src/theme";
 
-type Screen = "setup" | "home" | "chat";
+type Screen = "setup" | "home" | "chat" | "stats";
 
 const DEFAULT_URL = "http://100.125.84.47:4097";
 const DEFAULT_OMNI_URL = "http://100.125.84.47:4099";
@@ -33,6 +35,8 @@ export default function App() {
   const [errors, setErrors] = useState<Set<string>>(new Set()); // красная точка: была ошибка
   const [titles, setTitles] = useState<Record<string, string>>({}); // свежие имена из session.renamed
   const curSessionRef = useRef<string | null>(null); // id открытого чата (null — на списке)
+  // — связь: пингуем серверы, список/чат показывают индикатор и ресинкаются —
+  const [conn, setConn] = useState<Record<ServerKind, boolean>>({ opencode: true, omnirush: true });
 
   const applyUnread = (next: Set<string>) => {
     unreadRef.current = next;
@@ -167,6 +171,39 @@ export default function App() {
     initNotifications();
   }, [api]);
 
+  // пинг связи: каждые 15с спрашиваем каждого сервера, жив ли (лёгкий info-эндпоинт)
+  useEffect(() => {
+    let alive = true;
+    const ping = async (a: OpenCodeApi | null): Promise<boolean> => {
+      if (!a) return false;
+      try {
+        await a.info();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const tick = async () => {
+      const [o, om] = await Promise.all([ping(api), ping(omniApi)]);
+      if (!alive) return;
+      setConn((prev) => (prev.opencode === o && prev.omnirush === om ? prev : { opencode: o, omnirush: om }));
+    };
+    tick();
+    const t = setInterval(tick, 15000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [api, omniApi]);
+
+  // передний/фоновый план: нативному монитору (впереди баннеры шлёт сам JS, не дублировать)
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+    const sub = AppState.addEventListener("change", (st) => monitor.setForeground(st === "active"));
+    monitor.setForeground(true);
+    return () => sub.remove();
+  }, []);
+
   // тап по уведомлению → открыть сессию (hot + cold start)
   useEffect(() => {
     if (!api) return;
@@ -244,7 +281,10 @@ export default function App() {
           sessionID={currentSession.id}
           directory={currentSession.directory}
           onBack={closeChat}
+          conn={conn[chatTab]}
         />
+      ) : screen === "stats" && homeApi ? (
+        <StatsScreen api={homeApi} serverKind={tab} onBack={() => setScreen("home")} />
       ) : homeApi ? (
         <View style={{ flex: 1 }}>
           {/* flexShrink: 0 — список не должен выдавливать таббар за границу экрана */}
@@ -253,11 +293,13 @@ export default function App() {
               key={tab}
               api={homeApi}
               serverKind={tab}
+              conn={conn[tab]}
               unread={tab === "opencode" ? unread : undefined}
               errors={tab === "opencode" ? errors : undefined}
               titles={tab === "opencode" ? titles : undefined}
               onOpen={(sessionID, directory) => openChat(sessionID, directory, tab)}
               onSettings={tab === "opencode" ? () => setScreen("setup") : undefined}
+              onOpenStats={() => setScreen("stats")}
             />
           </View>
           <TabBar tab={tab} onChange={setTab} />

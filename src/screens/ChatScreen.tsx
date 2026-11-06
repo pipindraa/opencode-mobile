@@ -25,6 +25,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { File, Paths, Directory } from "expo-file-system";
 import { voiceNative } from "../voice";
+import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import Clipboard from "@react-native-clipboard/clipboard";
 import { OpenCodeApi, RenderMessage, RenderPart, Decision, ServerKind, PromptFile, basicAuthHeader } from "../api";
 import { subscribeSession, BusEvent, PermissionRequest } from "../events";
@@ -39,6 +40,8 @@ interface Props {
   sessionID: string;
   directory: string;
   onBack: () => void;
+  /** сервер на связи (пинг из App): false — баннер; при восстановлении — ресинк */
+  conn?: boolean;
 }
 
 interface ChatBubble {
@@ -57,6 +60,9 @@ interface PermCard {
 }
 
 const POLL_MS = 1600;
+
+/** быстрые фразы по умолчанию (общие для обоих серверов, редактируются в чате) */
+const DEFAULT_PHRASES = ["что сделал", "продолжай", "проверь ошибки", "подведи итог"];
 
 /** имя глифа Ionicons (для иконок, приходящих из данных: RenderPart.icon) */
 type IconName = React.ComponentProps<typeof Ionicons>["name"];
@@ -133,7 +139,7 @@ function fmtCost(c: any): string {
   return v >= 1 ? v.toFixed(2) : v.toFixed(3);
 }
 
-export default function ChatScreen({ api, serverKind = "opencode", sessionID, directory, onBack }: Props) {
+export default function ChatScreen({ api, serverKind = "opencode", sessionID, directory, onBack, conn }: Props) {
   const [bubbles, setBubbles] = useState<ChatBubble[]>([]);
   const [busy, setBusy] = useState(false);
   const [perms, setPerms] = useState<PermCard[]>([]);
@@ -175,6 +181,10 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   /** listening — ждём речь; processing — пользователь нажал стоп, готовим текст */
   const [voicePhase, setVoicePhase] = useState<"listening" | "processing">("listening");
   const dictRef = useRef("");
+  // — быстрые фразы: чипы над полем ввода, тексты редактируются в модалке —
+  const [phrases, setPhrases] = useState<string[]>([]);
+  const [phraseEdit, setPhraseEdit] = useState(false);
+  const [phraseDraft, setPhraseDraft] = useState("");
   // — файлы сессии (что агент изменил/создал) —
   const [files, setFiles] = useState<{ path: string; last: number }[] | null>(null);
   const [fileBusy, setFileBusy] = useState<string | null>(null);
@@ -261,6 +271,30 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       if (draftReady.current) AsyncStorage.saveDraft(serverKind, sessionID, inputRef.current);
     };
   }, [serverKind, sessionID]);
+
+  // — быстрые фразы: загрузка, вставка в поле, сохранение редактора —
+  useEffect(() => {
+    AsyncStorage.getQuickPhrases().then((p) => setPhrases(p.length > 0 ? p : DEFAULT_PHRASES));
+  }, []);
+
+  const applyPhrase = (p: string) => {
+    setInput((prev) => (prev.trim() ? prev.trimEnd() + " " + p : p));
+  };
+
+  const savePhrases = async () => {
+    const list = phraseDraft
+      .split("\n")
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .slice(0, 12);
+    setPhrases(list);
+    setPhraseEdit(false);
+    try {
+      await AsyncStorage.saveQuickPhrases(list);
+    } catch {
+      /* ignore */
+    }
+  };
 
   const toggleFav = async (m: ModelRow) => {
     const k = modelKey(m);
@@ -481,6 +515,17 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     };
   }, [loadMessages, pollState]);
 
+  // связь пропала → вернулась: ресинк (пока оффлайн могли уйти события/сообщения)
+  const prevConnRef = useRef<boolean | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevConnRef.current;
+    prevConnRef.current = conn;
+    if (prev === false && conn === true) {
+      loadMessages();
+      pollState();
+    }
+  }, [conn, loadMessages, pollState]);
+
   // живой стрим (SSE): текст по мере генерации, busy/perm/error/renamed — мгновенно
   useEffect(() => {
     if (serverKind === "omnirush") return; // у форка нет /api/event — остаётся поллинг
@@ -592,6 +637,15 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     return () => clearInterval(t);
   }, [busy, sending]);
 
+  // экран не гаснет, пока агент работает (автоматически, без тумблера)
+  useEffect(() => {
+    if (busy || sending) activateKeepAwakeAsync().catch(() => {});
+    else deactivateKeepAwake().catch(() => {});
+    return () => {
+      deactivateKeepAwake().catch(() => {});
+    };
+  }, [busy, sending]);
+
   // клавиатура: с Android 15 (targetSdk 36 + edge-to-edge) adjustResize игнорируется,
   // поэтому высоту берём из события и поднимаем панель ввода сами.
   const [kbHeight, setKbHeight] = useState(0);
@@ -665,7 +719,9 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       await pollState();
       loadMessages();
     } catch (e: any) {
-      setError(e?.message ?? String(e));
+      // «Нет соединения» не вываливаем куском — дружелюбно в error-строку
+      const msg = e?.message ?? String(e);
+      setError(msg.startsWith("Нет соединения") ? "Нет соединения с сервером — попробуй ещё раз" : msg);
       setInput(text); // вернуть текст, чтобы не потерять
       if (sentFiles.length > 0) setAttachments(sentFiles); // вернуть фото — отправить заново
     } finally {
@@ -766,9 +822,17 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     setTimeout(() => setCopied(false), 1500);
   };
 
+  /** тап по блоку кода — копировать код */
+  const copyCode = (code: string) => {
+    if (!code) return;
+    Clipboard.setString(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
   /**
-   * Меню сообщения — кнопка «…» рядом с пузырём. Долгое нажатие на сам текст —
-   * нативное выделение Android (selectable): зажал на слове → ручки → копировать.
+   * Меню сообщения — кнопка «…» рядом с пузырём. Долгое нажатие на пузырь —
+   * копировать всё сообщение (нативное выделение отключено — оно мешало).
    */
   const [menuBubble, setMenuBubble] = useState<ChatBubble | null>(null);
   const openMenu = (b: ChatBubble) => setMenuBubble(b);
@@ -1190,6 +1254,13 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </View>
       )}
 
+      {conn === false && (
+        <View style={s.connBanner}>
+          <Ionicons name="cloud-offline-outline" size={15} color={colors.warn} />
+          <Text style={s.connText}>Нет связи с сервером — повторюсь сам</Text>
+        </View>
+      )}
+
       {/* инфо-строка: селекторы (модель/агент/файлы) — скроллятся, токены — всегда видны справа */}
       <View style={s.infoRow}>
         <ScrollView
@@ -1271,7 +1342,10 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
               }}
             >
               {isUser && <BubbleMenuBtn onOpen={() => openMenu(item)} />}
-              <View style={[s.bubble, isUser ? s.bubbleUser : s.bubbleBot]}>
+              <Pressable
+                style={[s.bubble, isUser ? s.bubbleUser : s.bubbleBot]}
+                onLongPress={() => copyBubble(item)}
+              >
                 {(() => {
                   // картинки группируем, как в Telegram: одна — большая,
                   // 2+ — сеткой по две; тап по любой — на весь экран
@@ -1312,7 +1386,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                       // markdown в пузыре (bold/код/блоки/ссылки); курсор
                       // «печатает…» — на хвосте стрим-пузыря, пока агент работает
                       const cursor = isStreamBubble && busy && i === item.parts.length - 1 ? " ▍" : "";
-                      renderMdBlocks(p.text, isUser, `b${i}-`).forEach((n) => nodes.push(n));
+                      renderMdBlocks(p.text, isUser, `b${i}-`, copyCode).forEach((n) => nodes.push(n));
                       if (cursor) {
                         nodes.push(
                           <Text key={i + "-cur"} style={[s.bubbleText, isUser && { color: "#fff" }]}>
@@ -1364,7 +1438,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                     {new Date(item.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                   </Text>
                 ) : null}
-              </View>
+              </Pressable>
               {!isUser && <BubbleMenuBtn onOpen={() => openMenu(item)} />}
             </View>
           );
@@ -1613,6 +1687,33 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </View>
       )}
 
+      {/* чипы быстрых фраз над полем ввода (редактируются карандашом) */}
+      {phrases.length > 0 && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={s.phraseRow}
+          contentContainerStyle={{ gap: spacing.s, paddingHorizontal: spacing.l }}
+        >
+          {phrases.map((p, i) => (
+            <Pressable key={i} style={s.phraseChip} onPress={() => applyPhrase(p)}>
+              <Ionicons name="chatbubble-ellipses-outline" size={13} color={colors.textDim} />
+              <Text style={s.phraseText} numberOfLines={1}>{p}</Text>
+            </Pressable>
+          ))}
+          <Pressable
+            style={s.phraseChip}
+            onPress={() => {
+              setPhraseDraft(phrases.join("\n"));
+              setPhraseEdit(true);
+            }}
+          >
+            <Ionicons name="pencil-outline" size={13} color={colors.textDim} />
+            <Text style={s.phraseText}>Фразы</Text>
+          </Pressable>
+        </ScrollView>
+      )}
+
       <View style={s.inputRow}>
         <Pressable style={s.attachBtn} onPress={() => setAttachMenu(true)}>
           <Ionicons name="attach-outline" size={22} color={colors.textDim} />
@@ -1746,7 +1847,33 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </Pressable>
       </Modal>
 
-      {/* меню сообщения: «…» рядом с пузырём (выделение текста — нативное, зажатием) */}
+      {/* быстрые фразы: редактор (по одной на строку) */}
+      <Modal visible={phraseEdit} transparent animationType="slide" onRequestClose={() => setPhraseEdit(false)}>
+        <View style={s.overlay}>
+          <View style={s.modal}>
+            <Text style={s.sheetTitle}>Быстрые фразы</Text>
+            <Text style={s.hint}>
+              По одной фразе на строку. Тап по чипу над полем ввода дописывает фразу к сообщению.
+            </Text>
+            <TextInput
+              style={[s.searchInput, { height: 150, textAlignVertical: "top" }]}
+              value={phraseDraft}
+              onChangeText={setPhraseDraft}
+              multiline
+              placeholder={"что сделал\nпродолжай\nпроверь ошибки"}
+              placeholderTextColor={colors.textDim}
+            />
+            <Pressable style={s.btn} onPress={savePhrases}>
+              <Text style={s.btnText}>Сохранить</Text>
+            </Pressable>
+            <Pressable style={[s.btn, s.btnGhost]} onPress={() => setPhraseEdit(false)}>
+              <Text style={[s.btnText, { color: colors.text }]}>Отмена</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      {/* меню сообщения: «…» рядом с пузырём */}
       <Modal visible={menuBubble !== null} transparent animationType="fade" onRequestClose={closeMenu}>
         <Pressable style={s.overlay} onPress={closeMenu}>
           <View style={s.modal}>
@@ -1887,7 +2014,7 @@ function renderMdText(part: string, isUser: boolean, keyBase: string): React.Rea
     plain = [];
     if (!txt.trim()) return;
     nodes.push(
-      <Text key={keyBase + suffix} selectable style={[s.bubbleText, isUser && { color: "#fff" }]}>
+      <Text key={keyBase + suffix} style={[s.bubbleText, isUser && { color: "#fff" }]}>
         {renderMdInline(txt, isUser, keyBase + suffix + "-")}
       </Text>
     );
@@ -1900,7 +2027,6 @@ function renderMdText(part: string, isUser: boolean, keyBase: string): React.Rea
       nodes.push(
         <Text
           key={keyBase + "h" + li}
-          selectable
           style={[s.bubbleText, { fontWeight: "700", fontSize: size, marginTop: spacing.xs }, isUser && { color: "#fff" }]}
         >
           {renderMdInline(h[2], isUser, keyBase + "h" + li + "-")}
@@ -1914,8 +2040,9 @@ function renderMdText(part: string, isUser: boolean, keyBase: string): React.Rea
   return nodes;
 }
 
-/** весь текст: режем на блоки по ```, кодовые блоки — отдельным View */
-function renderMdBlocks(text: string, isUser: boolean, keyBase: string): React.ReactNode[] {
+/** весь текст: режем на блоки по ```, кодовые блоки — отдельным View;
+ *  тап по кодовому блоку — копировать код (onCopyCode) */
+function renderMdBlocks(text: string, isUser: boolean, keyBase: string, onCopyCode?: (code: string) => void): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
   const parts = text.split("```");
   parts.forEach((part, idx) => {
@@ -1930,11 +2057,21 @@ function renderMdBlocks(text: string, isUser: boolean, keyBase: string): React.R
         lang = firstLine;
         code = nl >= 0 ? part.slice(nl + 1) : "";
       }
-      nodes.push(
-        <View key={keyBase + "c" + idx} style={[s.mdCodeBlock, isUser && { backgroundColor: "rgba(0,0,0,0.28)" }]}>
+      const codeText = code.replace(/\n$/, "");
+      const block = (
+        <View style={[s.mdCodeBlock, isUser && { backgroundColor: "rgba(0,0,0,0.28)" }]}>
           {lang ? <Text style={[s.mdCodeLang, isUser && { color: "rgba(255,255,255,0.6)" }]}>{lang}</Text> : null}
-          <Text style={[s.mdCodeText, isUser && { color: "#eef2fa" }]}>{code.replace(/\n$/, "")}</Text>
+          <Text style={[s.mdCodeText, isUser && { color: "#eef2fa" }]}>{codeText}</Text>
         </View>
+      );
+      nodes.push(
+        onCopyCode ? (
+          <Pressable key={keyBase + "c" + idx} onPress={() => onCopyCode(codeText)}>
+            {block}
+          </Pressable>
+        ) : (
+          <View key={keyBase + "c" + idx}>{block}</View>
+        )
       );
     }
   });
@@ -1942,7 +2079,7 @@ function renderMdBlocks(text: string, isUser: boolean, keyBase: string): React.R
 }
 
 /** «…» рядом с пузырём: меню сообщения (копировать всё / откатить).
- *  Долгое нажатие на текст — нативное выделение, оно не уходит сюда. */
+ *  Долгое нажатие на пузырь — копировать всё (onLongPress), сюда не уходит. */
 function BubbleMenuBtn({ onOpen }: { onOpen: () => void }) {
   return (
     <Pressable
@@ -2283,6 +2420,34 @@ const s = StyleSheet.create({
   chipFixed: { flexShrink: 0 },
   toolLineRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   copiedRow: { flexDirection: "row", alignItems: "center", gap: 5 },
+  connBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginHorizontal: spacing.l,
+    marginTop: spacing.xs,
+    backgroundColor: colors.surface,
+    borderColor: colors.warn,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: spacing.m,
+    paddingVertical: 8,
+  },
+  connText: { color: colors.warn, fontSize: fontSize.s, flex: 1 },
+  phraseRow: { maxHeight: 48, paddingBottom: spacing.xs },
+  phraseChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: spacing.s,
+    paddingVertical: 6,
+    maxWidth: 200,
+  },
+  phraseText: { color: colors.textDim, fontSize: fontSize.s, fontWeight: "600" },
   cardTitleRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   btnRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   fileRow: { flexDirection: "row", alignItems: "center", gap: 6 },

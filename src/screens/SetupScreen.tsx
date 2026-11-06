@@ -9,10 +9,12 @@ import {
   BackHandler,
   ScrollView,
   Alert,
+  Switch,
 } from "react-native";
 import Constants from "expo-constants";
 import { Ionicons } from "@expo/vector-icons";
 import { OpenCodeApi } from "../api";
+import { monitor } from "../monitor";
 import { checkLatest, downloadAndInstall, isNewer, UPDATE_REPO } from "../updater";
 import { colors, spacing, fontSize } from "../theme";
 
@@ -34,6 +36,43 @@ export default function SetupScreen({ initialURL, initialPassword, onSave, onCan
   const [ok, setOk] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  // — фоновый монитор: нативная WorkManager-цепочка, переживает убийство приложения —
+  const [monOn, setMonOn] = useState(false);
+  const [monBusy, setMonBusy] = useState(false);
+  const [monErr, setMonErr] = useState<string | null>(null);
+
+  // состояние монитора при открытии настроек (работал до рестарта — WorkManager помнит)
+  useEffect(() => {
+    monitor.isRunning().then(setMonOn);
+  }, []);
+
+  const toggleMonitor = async () => {
+    setMonErr(null);
+    if (!monitor.available()) {
+      setMonErr("Монитор недоступен в этой сборке");
+      return;
+    }
+    const on = !monOn;
+    setMonBusy(true);
+    try {
+      if (on) {
+        if (!url.trim() || !password.trim()) {
+          setMonErr("Сначала введи адрес и пароль сервера");
+          return;
+        }
+        // монитор пока только для сервера OpenCode (у форка свой статусный эндпоинт)
+        const ok = await monitor.start(url.trim(), password.trim(), "opencode");
+        setMonOn(ok);
+        if (!ok) setMonErr("Не удалось запустить монитор — попробуй ещё раз");
+      } else {
+        const ok = await monitor.stop();
+        setMonOn(!ok);
+        if (!ok) setMonErr("Не удалось остановить монитор");
+      }
+    } finally {
+      setMonBusy(false);
+    }
+  };
 
   // Android "назад" — назад к списку сессий, а не выход из приложения
   useEffect(() => {
@@ -206,6 +245,30 @@ export default function SetupScreen({ initialURL, initialPassword, onSave, onCan
           )}
         </Pressable>
         {updateState ? <Text style={s.meta}>{updateState}</Text> : null}
+
+        <View style={s.divider} />
+
+        <Text style={s.section}>Фоновый монитор</Text>
+        <Text style={s.meta}>
+          Когда приложение убито, фоновый сервис раз в минуту спрашивает сервер OpenCode и присылает
+          уведомление, когда агент закончил сессию. Пока приложение открыто — баннеры показывает сам чат.
+        </Text>
+        <View style={s.monRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={s.monText}>Мониторить сервер OpenCode</Text>
+          </View>
+          {monBusy ? (
+            <ActivityIndicator size="small" color={colors.textDim} />
+          ) : (
+            <Switch
+              value={monOn}
+              onValueChange={toggleMonitor}
+              trackColor={{ false: colors.surface2, true: colors.accent }}
+              thumbColor="#fff"
+            />
+          )}
+        </View>
+        {monErr ? <Text style={s.err}>{monErr}</Text> : null}
       </ScrollView>
     </View>
   );
@@ -302,4 +365,18 @@ const s = StyleSheet.create({
   },
   btnGhostText: { color: colors.text, fontSize: fontSize.m, fontWeight: "600" },
   ghostRow: { flexDirection: "row", alignItems: "center", gap: spacing.s },
+  monRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: spacing.m,
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: spacing.m,
+    paddingVertical: spacing.m,
+    gap: spacing.m,
+  },
+  monText: { color: colors.text, fontSize: fontSize.m, fontWeight: "600" },
 });

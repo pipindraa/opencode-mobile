@@ -69,4 +69,17 @@ export const AsyncStorage = {
       /* черновик не критичен */
     }
   },
+  /** быстрые фразы: чипы над полем ввода (общие для обоих серверов) */
+  async getQuickPhrases(): Promise<string[]> {
+    try {
+      const raw = await AsyncStorageInternal.getItem(PREFIX + "quickPhrases");
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr.filter((x: any) => typeof x === "string" && x.trim()).map((x: string) => x.trim()) : [];
+    } catch {
+      return [];
+    }
+  },
+  async saveQuickPhrases(phrases: string[]): Promise<void> {
+    await AsyncStorageInternal.setItem(PREFIX + "quickPhrases", JSON.stringify(phrases));
+  },
 };
