@@ -465,3 +465,72 @@ logcat-проверки.
   коммит 1350c2e в origin/master
 - [ ] Владелец: ставит 1.6.8 через «Проверить обновления», проверяет
 
+## v1.7.0 (06.11) — архив, «Расходы», фоновый монитор
+Волна из восьми улучшений по решениям владельца (всё — только то, что просили;
+хэптика/бюджет/озвучка/профили серверов — отклонены или в бэклоге):
+1. **Архив сессий** (только OpenCode, у форка таких эндпоинтов нет): свайп
+   карточки влево — фоновое действие «В архив» (из архива — «Вернуть»); долгий
+   тап — модал-меню (Переименовать / Архив / Удалить, без пункта избранного —
+   звезда и так есть). HomeScreen: SwipeRow (PanResponder+Animated, порог 60,
+   ACTION_W=120; тап по открытой карточке закрывает свайп), SessionRow.
+   API: GET /api/session?archived=true|false, PATCH {title|archived}, DELETE
+   (проверено живьём на 127.0.0.1:28894, все 204/200). Omnirush — без свайпа
+   и меню (у моста нет архива/переименования/удаления), JS-методы кидают
+   дружелюбную ошибку.
+2. **Фильтры списка**: Все / Активные / Закрытые / Архив (Архив — только для
+   OpenCode, при смене сервера фильтр сбрасывается). Архив — отдельный
+   запрос + сортировка по timeUpdated.
+3. **Копирование**: тап по блоку кода — код в буфер (кодовые блоки в
+   Pressable, renderMdBlocks+onCopyCode, плашка «Скопировано»); долгий тап по
+   пузырю — копировать всё сообщение (нативное selectable убрано — мешало).
+   Только эти два действия, как просили.
+4. **Keep-awake**: экран не гаснет, пока агент работает (busy || sending) —
+   автоматически, без тумблера. expo-keep-awake SDK 58: activateKeepAwakeAsync/
+   deactivateKeepAwake (простых activate/deactivate в SDK 58 нет).
+5. **Быстрые фразы**: чипы над полем ввода (гориз. ScrollView), тап — дописать
+   в инпут. Карандаш «Фразы» — модал-редактор (по одной на строку, до 12).
+   store: getQuickPhrases/saveQuickPhrases (ключ "quickPhrases", оба сервера),
+   дефолты: что сделал / продолжай / проверь ошибки / подведи итог.
+6. **Индикатор связи**: App пингует оба сервера раз в 15с (лёгкий info-эндпоинт)
+   → conn {opencode,omnirush}. false — бейдж «нет связи» в списке (список
+   OpenCode) и баннер в чате; при false→true — авто-ресинк (loadMessages+
+   pollState). Ошибка отправки «Нет соединения» — дружелюбная строка.
+7. **Экран «Расходы»** (иконка stats-chart-outline в списке): сегменты
+   День/Неделя. День: навигация дат (‹ ›, не дальше сегодня, глубже — 1 год),
+   output-токены крупно, вход/размышление/кэш/цена — мелким, разбор по чатам
+   (сессии, тронутые в этот день, до 10, токены по time.created сообщений).
+   Неделя: 7 строк с барами, тап по дню → день. Источник: v2
+   /api/experimental/session/stats?from&to (по дню — отдельные вызовы, для
+   недели 7 шт.; activity в ответе даёт только steps — по-дням токены так не
+   получить). У Omnirush эндпоинта нет — fallback по сообщениям (output).
+8. **Фоновый монитор** (Настройки → «Фоновый монитор», ВЫКЛ по умолчанию,
+   только сервер OpenCode): app убит → WorkManager опрашивает
+   /api/session/active ~раз в 60с → «была занята → свободна» и app в фоне —
+   уведомление «Агент закончил: {заголовок}» (канал oc-monitor, чек
+   POST_NOTIFICATIONS на API 33+, тап → MainActivity). Впереди — не дублирует
+   (AppState → setForeground). Нативка: MonitorModule.kt (start/stop/isRunning/
+   setForeground, prefs "oc_monitor") + MonitorWorker.kt (цепочка
+   OneTimeWorkRequest, unique "oc_monitor", NetworkType.CONNECTED; сервер
+   недоступен → старое состояние, reschedule) + MonitorPackage. JS-обёртка
+   src/monitor.ts (withTimeout-Promises, available()).
+   **ЛОВУШКА СБОРКИ**: work-runtime 2.10.0 в этом окружении — НЕ стандартный
+   AndroidX (Kotlin-гибрид, проверено javap по AAR): Worker.doWork() возвращает
+   ListenableWorker.Result (фабрики success()/retry()); контекст —
+   applicationContext (getApplicationContext(), НЕ appContext);
+   OneTimeWorkRequestBuilder<W>() — Kotlin top-level ФУНКЦИЯ; у WorkManager нет
+   getWorkInfoByUniqueWork — есть getWorkInfosForUniqueWork(String) →
+   ListenableFuture<List<WorkInfo>>; enqueueUniqueWork возвращает Operation.
+   Дамп API: %TEMP%\opencode\workrt3\classes (javap jdk-25.0.2).
+- Голос (voice.ts + useEffect диктовки) и тёмная тема — НЕ ТРОГАЛИ.
+- [x] tsc 0 ошибок; impeccable detect --json по 5 UI-файлам = [] (чисто)
+- [x] versionName 1.7.0 / versionCode 10700 / app.json 1.7.0
+- [x] Сборка 10700 (первый провал на compileReleaseKotlin — чужой API
+  WorkManager, починил; повтор — BUILD SUCCESSFUL 4м19с)
+  → APK: versionCode=10700 versionName=1.7.0 (aapt); releases/app-release-1.7.0.apk
+- [x] Релиз v1.7.0 на GitHub + APK (app-release-1.7.0.apk, Latest);
+  коммит 10eb4f7 в origin/master
+- [ ] Владелец: ставит 1.7.0 через «Проверить обновления», проверяет
+
+## Бэклог (по решениям владельца)
+- Профили серверов (несколько адресов/паролей, переключение).
+
