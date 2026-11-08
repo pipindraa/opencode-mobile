@@ -531,6 +531,48 @@ logcat-проверки.
   коммит 10eb4f7 в origin/master
 - [ ] Владелец: ставит 1.7.0 через «Проверить обновления», проверяет
 
+## v1.7.1 (08.11) — починка краша при старте
+Владелец: «приложение не работает, телефон подключен». 1.7.0 падал при старте:
+белый экран и выход. Причина найдена и зафиксирована:
+- Краш: `RuntimeException: Unable to get provider androidx.startup.
+  InitializationProvider: java.lang.NoSuchMethodException:
+  androidx.work.impl.WorkDatabase_Impl.<init> []` (в WorkManagerInitializer.create).
+- Механика: Room создаёт `WorkDatabase_Impl` ПО ИМЕНИ (WorkDatabase + «_Impl»)
+  и зовёт no-args конструктор ЧЕРЕЗ РЕФЛЕКСИЮ. R8 в release-сборке таких
+  вызовов не видит и вырезает конструктор (плюс поля и тела DAO-геттеров).
+  Проверено dexdump по dex битого 1.7.0: класс `WorkDatabase_Impl` есть,
+  метода `<init>` — нет.
+- Почему не спасло: AAR work-runtime 2.10.0 содержит `WorkDatabase_Impl`
+  С конструктором (javap), но его consumer-proguard.txt хранит только
+  ListenableWorker/WorkerParameters/InputMerger — за `WorkDatabase_Impl`
+  никто не отвечает. Источник класса — только этот AAR (проверено по
+  всему gradle-кэшу).
+- Правка: `android/app/proguard-rules.pro`:
+  ```
+  -keep class androidx.work.impl.WorkDatabase { *; }
+  -keep class androidx.work.impl.WorkDatabase_Impl { *; }
+  ```
+  **`/android` gitignored** — правка живёт только локально и в APK. При
+  регенерации нативки правило легко потерять — текст зафиксирован В ЭТОМ
+  МЕСТЕ, при любой пересборке с чистой `android/` добавить обратно.
+- [x] Сборка 10701 (BUILD SUCCESSFUL 3м56с) → APK: versionCode=10701
+  versionName=1.7.1 (aapt); releases/app-release-1.7.1.apk (68.7 МБ)
+- [x] dexdump по новому APK: no-args `<init>` WorkDatabase_Impl на месте
+- [x] Установлено на телефон (SM-M526B, RFCRB07TANF) по adb: `install -r`
+  Success, dumpsys 10701/1.7.1; запуск: процесс жив (pid 20393),
+  `ReactNativeJS: Running "main"`, NO CRASH / NO FATAL в logcat;
+  `am start` → «delivered to currently running top-most instance».
+  UI-проверка через uiautomator dump: на экране «Сессии OpenCode»,
+  вкладки Все/Активные/Закрытые/Архив, поиск, избранное, список сессий
+  с кнопками «В архив», серверы OpenCode/Omnirush — всё отрисовано.
+- [x] Релиз v1.7.1 на GitHub + APK (app-release-1.7.1.apk, Latest);
+  коммит 56697ac (app.json, package.json) в origin/master
+- Релиз v1.7.0 на GitHub остаётся с БИТЫМ APK — не использовать;
+  дальше — «Проверить обновления» (найдёт 1.7.1).
+- [ ] Владелец: 1.7.1 уже на телефоне и работает; проверить функции
+  (архив/свайп, «Расходы», фоновый монитор) — дальше обновления
+  сами через «Проверить обновления»
+
 ## Бэклог (по решениям владельца)
 - Профили серверов (несколько адресов/паролей, переключение).
 
