@@ -10,6 +10,7 @@ import {
   ScrollView,
   Alert,
   Switch,
+  Modal,
 } from "react-native";
 import Constants from "expo-constants";
 import { Ionicons } from "@expo/vector-icons";
@@ -17,6 +18,7 @@ import { OpenCodeApi } from "../api";
 import { monitor } from "../monitor";
 import { checkLatest, downloadAndInstall, isNewer, UPDATE_REPO } from "../updater";
 import { colors, spacing, fontSize } from "../theme";
+import { AsyncStorage } from "../store";
 
 interface Props {
   initialURL: string;
@@ -40,6 +42,32 @@ export default function SetupScreen({ initialURL, initialPassword, onSave, onCan
   const [monOn, setMonOn] = useState(false);
   const [monBusy, setMonBusy] = useState(false);
   const [monErr, setMonErr] = useState<string | null>(null);
+  // — быстрые фразы: общие для обоих серверов, чипы над полем ввода в чате —
+  const [phrases, setPhrases] = useState<string[]>([]);
+  const [phraseEdit, setPhraseEdit] = useState(false);
+  const [phraseDraft, setPhraseDraft] = useState("");
+
+  const DEFAULT_PHRASES = ["что сделал", "продолжай", "проверь ошибки", "подведи итог"];
+
+  // при открытии настроек подгружаем сохранённые фразы (пусто → дефолты)
+  useEffect(() => {
+    AsyncStorage.getQuickPhrases().then((p) => setPhrases(p.length > 0 ? p : DEFAULT_PHRASES));
+  }, []);
+
+  const savePhrases = async () => {
+    const list = phraseDraft
+      .split("\n")
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .slice(0, 12);
+    setPhrases(list);
+    setPhraseEdit(false);
+    try {
+      await AsyncStorage.saveQuickPhrases(list);
+    } catch {
+      /* ignore */
+    }
+  };
 
   // состояние монитора при открытии настроек (работал до рестарта — WorkManager помнит)
   useEffect(() => {
@@ -269,7 +297,68 @@ export default function SetupScreen({ initialURL, initialPassword, onSave, onCan
           )}
         </View>
         {monErr ? <Text style={s.err}>{monErr}</Text> : null}
+
+        <View style={s.divider} />
+
+        <Text style={s.section}>Быстрые фразы</Text>
+        <Text style={s.meta}>
+          Готовые ответы-чипы над полем ввода в чате (общие для обоих серверов). Тап по чипу
+          дописывает фразу к сообщению.
+        </Text>
+        <View style={s.phraseList}>
+          {phrases.length === 0 ? (
+            <Text style={s.meta}>Фраз не задано.</Text>
+          ) : (
+            phrases.map((p, i) => (
+              <View key={i} style={s.phraseItem}>
+                <Ionicons name="chatbubble-ellipses-outline" size={15} color={colors.textDim} />
+                <Text style={s.phraseItemText} numberOfLines={1}>
+                  {p}
+                </Text>
+              </View>
+            ))
+          )}
+        </View>
+        <Pressable
+          style={({ pressed }) => [s.btnGhost, pressed && { opacity: 0.85 }]}
+          onPress={() => {
+            setPhraseDraft(phrases.join("\n"));
+            setPhraseEdit(true);
+          }}
+        >
+          <View style={s.ghostRow}>
+            <Ionicons name="create-outline" size={18} color={colors.text} />
+            <Text style={s.btnGhostText}>Редактировать фразы</Text>
+          </View>
+        </Pressable>
       </ScrollView>
+
+      {/* быстрые фразы: редактор (по одной на строку) */}
+      <Modal visible={phraseEdit} transparent animationType="slide" onRequestClose={() => setPhraseEdit(false)}>
+        <View style={s.overlay}>
+          <View style={s.phraseModal}>
+            <Text style={s.sheetTitle}>Быстрые фразы</Text>
+            <Text style={s.hint}>
+              По одной фразе на строку (до 12). Тап по чипу над полем ввода в чате дописывает фразу
+              к сообщению. Чтобы удалить фразу — убери её строку.
+            </Text>
+            <TextInput
+              style={[s.input, { height: 150, textAlignVertical: "top" }]}
+              value={phraseDraft}
+              onChangeText={setPhraseDraft}
+              multiline
+              placeholder={"что сделал\nпродолжай\nпроверь ошибки"}
+              placeholderTextColor={colors.textDim}
+            />
+            <Pressable style={s.btn} onPress={savePhrases}>
+              <Text style={s.btnText}>Сохранить</Text>
+            </Pressable>
+            <Pressable style={[s.btn, s.btnGhost]} onPress={() => setPhraseEdit(false)}>
+              <Text style={[s.btnText, { color: colors.text }]}>Отмена</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -379,4 +468,42 @@ const s = StyleSheet.create({
     gap: spacing.m,
   },
   monText: { color: colors.text, fontSize: fontSize.m, fontWeight: "600" },
+  phraseList: {
+    marginTop: spacing.m,
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: spacing.m,
+    paddingVertical: spacing.xs,
+    gap: 2,
+  },
+  phraseItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.s,
+    paddingVertical: 8,
+  },
+  phraseItemText: { color: colors.text, fontSize: fontSize.m, flex: 1 },
+  overlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    justifyContent: "flex-end",
+  },
+  phraseModal: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    padding: spacing.xl,
+    gap: spacing.s,
+  },
+  sheetTitle: {
+    color: colors.text,
+    fontSize: fontSize.l,
+    fontWeight: "700",
+  },
+  hint: {
+    color: colors.textDim,
+    fontSize: fontSize.s,
+  },
 });

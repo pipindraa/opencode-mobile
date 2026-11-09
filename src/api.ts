@@ -364,11 +364,13 @@ class OpenCodeApi {
    * Сырые сообщения сессии (для статистики): нужен tokens/cost/time у каждого.
    * Форма: {id, time:{created}, type, content[], tokens:{input,output,reasoning,cache:{read,write}}, cost}
    * (у форка — {info:{...}, parts:[...]}; парсер defensive).
+   * Лимит сервера — 200 (больше отдаёт 400), поэтому ограничиваем до 200.
    */
-  async rawMessages(sessionID: string, limit = 500): Promise<any[]> {
+  async rawMessages(sessionID: string, limit = 200): Promise<any[]> {
+    const cap = Math.max(1, Math.min(limit, 200));
     const path = this.omni
-      ? `/session/${sessionID}/message?limit=${limit}`
-      : `/api/session/${sessionID}/message?limit=${limit}`;
+      ? `/session/${sessionID}/message?limit=${cap}`
+      : `/api/session/${sessionID}/message?limit=${cap}`;
     const data = await this.req(path);
     return extractList(data);
   }
