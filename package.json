@@ -1,6 +1,6 @@
 {
   "name": "opencode-mobile",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "main": "index.ts",
   "dependencies": {
     "@expo/vector-icons": "^15.0.2",

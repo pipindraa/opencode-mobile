@@ -1693,7 +1693,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
           horizontal
           showsHorizontalScrollIndicator={false}
           style={s.phraseRow}
-          contentContainerStyle={{ gap: spacing.s, paddingHorizontal: spacing.l }}
+          contentContainerStyle={{ gap: spacing.s, paddingHorizontal: spacing.l, alignItems: "center" }}
         >
           {phrases.map((p, i) => (
             <Pressable key={i} style={s.phraseChip} onPress={() => applyPhrase(p)}>
@@ -2434,7 +2434,10 @@ const s = StyleSheet.create({
     paddingVertical: 8,
   },
   connText: { color: colors.warn, fontSize: fontSize.s, flex: 1 },
-  phraseRow: { maxHeight: 48, paddingBottom: spacing.xs },
+  // строка чипов — авто-высота по контенту. Старый maxHeight: 48 резал чипы
+  // снизу на телефонах с крупным системным шрифтом (высота чипа зависит от
+  // font_scale и превышаетла 48 → нижняя часть текста срезалась).
+  phraseRow: { paddingBottom: spacing.xs },
   phraseChip: {
     flexDirection: "row",
     alignItems: "center",
