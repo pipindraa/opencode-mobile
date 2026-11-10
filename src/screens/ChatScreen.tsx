@@ -1274,7 +1274,12 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </View>
       )}
 
-      {/* инфо-строка: селекторы (модель/агент/файлы) — скроллятся, токены — всегда видны справа.
+      {/* инфо-строка: модель/агент/файлы/токены — всё в ОДНОМ горизонтальном
+          скролле. Двухзонная схема (HVS + жёсткие токены справа) клипалась на
+          телефоне: длинное имя модели + широкие токены сжимали HVS, и чипы
+          агент/файлы срезались его правым краем (агент — без шеврона, «Файлы»
+          вообще не видно). В одной строке чипы не режутся рамкой контейнера —
+          не хватает места, и строка скроллится (как строка фраз ниже).
           Высота чипов и строки явная (chipH из font_scale) — авто-высота
           горизонтального ScrollView сжимается до ~30px и клипает чипы */}
       <View style={[s.infoRow, { height: chipH + spacing.xs }]}>
@@ -1306,13 +1311,13 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
               </View>
             </Pressable>
           )}
+          <Pressable style={[s.chip, { height: chipH }]} onPress={() => { loadContext(); setSheet("ctx"); }}>
+            <View style={s.chipRow}>
+              <Ionicons name="stats-chart-outline" size={14} color={colors.textDim} />
+              <Text style={s.chipText} numberOfLines={1}>{tokLabel}</Text>
+            </View>
+          </Pressable>
         </ScrollView>
-        <Pressable style={[s.chip, s.chipFixed, { height: chipH }]} onPress={() => { loadContext(); setSheet("ctx"); }}>
-          <View style={s.chipRow}>
-            <Ionicons name="stats-chart-outline" size={14} color={colors.textDim} />
-            <Text style={s.chipText} numberOfLines={1}>{tokLabel}</Text>
-          </View>
-        </Pressable>
       </View>
 
       {/* что делает агент: видно всегда, без «непонятного ожидания» */}
@@ -1702,35 +1707,41 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </View>
       )}
 
-      {/* чипы быстрых фраз над полем ввода (редактируются карандашом) */}
+      {/* чипы быстрых фраз над полем ввода (редактируются карандашом).
+          Структура как у инфо-строки: View(height) → HVS(height) → чипы.
+          «Голый» ScrollView с явной высотой на телефоне владельца клипал чипы
+          по вертикали (чип 74px вместо 91px, без рамок сверху/снизу);
+          обёртка View с высотой держит полный chipH — как в инфо-строке. */}
       {phrases.length > 0 && (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={[s.phraseRow, { height: chipH + spacing.xs }]}
-          contentContainerStyle={{ gap: spacing.s, paddingHorizontal: spacing.l, alignItems: "center" }}
-        >
-          {phrases.map((p, i) => (
-            <Pressable
-              key={i}
-              style={[s.phraseChip, { height: chipH }]}
-              onPress={() => applyPhrase(p)}
-            >
-              <Ionicons name="chatbubble-ellipses-outline" size={13} color={colors.textDim} />
-              <Text style={s.phraseText} numberOfLines={1}>{p}</Text>
-            </Pressable>
-          ))}
-          <Pressable
-            style={[s.phraseChip, { height: chipH }]}
-            onPress={() => {
-              setPhraseDraft(phrases.length > 0 ? [...phrases] : [""]);
-              setPhraseEdit(true);
-            }}
+        <View style={[s.phraseRow, { height: chipH + spacing.xs }]}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={{ flex: 1, height: chipH }}
+            contentContainerStyle={{ gap: spacing.s, paddingHorizontal: spacing.l, alignItems: "center" }}
           >
-            <Ionicons name="pencil-outline" size={13} color={colors.textDim} />
-            <Text style={s.phraseText}>Фразы</Text>
-          </Pressable>
-        </ScrollView>
+            {phrases.map((p, i) => (
+              <Pressable
+                key={i}
+                style={[s.phraseChip, { height: chipH }]}
+                onPress={() => applyPhrase(p)}
+              >
+                <Ionicons name="chatbubble-ellipses-outline" size={13} color={colors.textDim} />
+                <Text style={s.phraseText} numberOfLines={1}>{p}</Text>
+              </Pressable>
+            ))}
+            <Pressable
+              style={[s.phraseChip, { height: chipH }]}
+              onPress={() => {
+                setPhraseDraft(phrases.length > 0 ? [...phrases] : [""]);
+                setPhraseEdit(true);
+              }}
+            >
+              <Ionicons name="pencil-outline" size={13} color={colors.textDim} />
+              <Text style={s.phraseText}>Фразы</Text>
+            </Pressable>
+          </ScrollView>
+        </View>
       )}
 
       <View style={s.inputRow}>
@@ -2465,7 +2476,6 @@ const s = StyleSheet.create({
   stopRow: { flexDirection: "row", alignItems: "center", gap: 5 },
   chipRow: { flexDirection: "row", alignItems: "center", gap: 5 },
   chipModel: { maxWidth: 160 },
-  chipFixed: { flexShrink: 0 },
   toolLineRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   copiedRow: { flexDirection: "row", alignItems: "center", gap: 5 },
   connBanner: {
