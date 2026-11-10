@@ -184,7 +184,11 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   // — быстрые фразы: чипы над полем ввода, тексты редактируются в модалке —
   const [phrases, setPhrases] = useState<string[]>([]);
   const [phraseEdit, setPhraseEdit] = useState(false);
-  const [phraseDraft, setPhraseDraft] = useState("");
+  const [phraseDraft, setPhraseDraft] = useState<string[]>([]);
+  /** фактическая высота чипа (onLayout) — строке задаём её явно: горизонтальный
+   *  ScrollView сам неправильно меряет высоту при крупном системном шрифте
+   *  (font_scale ~3.5) и резал чипы снизу (баг из 1.7.x) */
+  const [chipH, setChipH] = useState(0);
   // — файлы сессии (что агент изменил/создал) —
   const [files, setFiles] = useState<{ path: string; last: number }[] | null>(null);
   const [fileBusy, setFileBusy] = useState<string | null>(null);
@@ -282,11 +286,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   };
 
   const savePhrases = async () => {
-    const list = phraseDraft
-      .split("\n")
-      .map((x) => x.trim())
-      .filter(Boolean)
-      .slice(0, 12);
+    const list = phraseDraft.map((x) => x.trim()).filter(Boolean).slice(0, 12);
     setPhrases(list);
     setPhraseEdit(false);
     try {
@@ -1692,11 +1692,19 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          style={s.phraseRow}
+          style={[s.phraseRow, chipH > 0 && { height: chipH + spacing.xs }]}
           contentContainerStyle={{ gap: spacing.s, paddingHorizontal: spacing.l, alignItems: "center" }}
         >
           {phrases.map((p, i) => (
-            <Pressable key={i} style={s.phraseChip} onPress={() => applyPhrase(p)}>
+            <Pressable
+              key={i}
+              style={s.phraseChip}
+              onLayout={(e) => {
+                const h = Math.round(e.nativeEvent.layout.height);
+                if (h > 0) setChipH(h);
+              }}
+              onPress={() => applyPhrase(p)}
+            >
               <Ionicons name="chatbubble-ellipses-outline" size={13} color={colors.textDim} />
               <Text style={s.phraseText} numberOfLines={1}>{p}</Text>
             </Pressable>
@@ -1704,7 +1712,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
           <Pressable
             style={s.phraseChip}
             onPress={() => {
-              setPhraseDraft(phrases.join("\n"));
+              setPhraseDraft(phrases.length > 0 ? [...phrases] : [""]);
               setPhraseEdit(true);
             }}
           >
@@ -1847,22 +1855,51 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </Pressable>
       </Modal>
 
-      {/* быстрые фразы: редактор (по одной на строку) */}
+      {/* быстрые фразы: редактор — каждая фраза отдельной строкой */}
       <Modal visible={phraseEdit} transparent animationType="slide" onRequestClose={() => setPhraseEdit(false)}>
         <View style={s.overlay}>
           <View style={s.modal}>
             <Text style={s.sheetTitle}>Быстрые фразы</Text>
             <Text style={s.hint}>
-              По одной фразе на строку. Тап по чипу над полем ввода дописывает фразу к сообщению.
+              Тап по чипу над полем ввода дописывает фразу к сообщению. Убери строку, чтобы удалить
+              фразу.
             </Text>
-            <TextInput
-              style={[s.searchInput, { height: 150, textAlignVertical: "top" }]}
-              value={phraseDraft}
-              onChangeText={setPhraseDraft}
-              multiline
-              placeholder={"что сделал\nпродолжай\nпроверь ошибки"}
-              placeholderTextColor={colors.textDim}
-            />
+            <ScrollView style={{ maxHeight: 340 }}>
+              {phraseDraft.map((p, i) => (
+                <View key={i} style={s.phraseDraftRow}>
+                  <TextInput
+                    style={s.phraseDraftInput}
+                    value={p}
+                    onChangeText={(t) =>
+                      setPhraseDraft((prev) => prev.map((x, j) => (j === i ? t : x)))
+                    }
+                    placeholder={"например: проверь ошибки"}
+                    placeholderTextColor={colors.textDim}
+                    returnKeyType={i < phraseDraft.length - 1 ? "next" : "done"}
+                    onSubmitEditing={() => {
+                      if (i < phraseDraft.length - 1) return;
+                      if (phraseDraft.length < 12) setPhraseDraft((prev) => [...prev, ""]);
+                    }}
+                  />
+                  {phraseDraft.length > 1 && (
+                    <Pressable style={s.phraseDraftDel} onPress={() =>
+                      setPhraseDraft((prev) => prev.filter((_, j) => j !== i))
+                    } hitSlop={8}>
+                      <Ionicons name="close-circle" size={20} color={colors.danger} />
+                    </Pressable>
+                  )}
+                </View>
+              ))}
+            </ScrollView>
+            {phraseDraft.length < 12 && (
+              <Pressable
+                style={({ pressed }) => [s.phraseAddBtn, pressed && { opacity: 0.85 }]}
+                onPress={() => setPhraseDraft((prev) => [...prev, ""])}
+              >
+                <Ionicons name="add-circle-outline" size={18} color={colors.text} />
+                <Text style={[s.btnText, { color: colors.text }]}>Добавить фразу</Text>
+              </Pressable>
+            )}
             <Pressable style={s.btn} onPress={savePhrases}>
               <Text style={s.btnText}>Сохранить</Text>
             </Pressable>
@@ -2434,9 +2471,10 @@ const s = StyleSheet.create({
     paddingVertical: 8,
   },
   connText: { color: colors.warn, fontSize: fontSize.s, flex: 1 },
-  // строка чипов — авто-высота по контенту. Старый maxHeight: 48 резал чипы
-  // снизу на телефонах с крупным системным шрифтом (высота чипа зависит от
-  // font_scale и превышаетла 48 → нижняя часть текста срезалась).
+  // строка чипов — ВЫСОТА ЯВНАЯ (chipH из onLayout первого чипа + paddingBottom).
+  // Авто-высота горизонтального ScrollView при крупном системном шрифте (font_scale
+  // ~3.5) меряется меньше фактического чипа → низ чипов резался прямой линией
+  // (баг из 1.7.2/1.7.3: сначала maxHeight:48, потом и без него).
   phraseRow: { paddingBottom: spacing.xs },
   phraseChip: {
     flexDirection: "row",
@@ -2451,6 +2489,42 @@ const s = StyleSheet.create({
     maxWidth: 200,
   },
   phraseText: { color: colors.textDim, fontSize: fontSize.s, fontWeight: "600" },
+  // редактор фраз: каждая фраза — отдельная строка (TextInput + крестик удаления)
+  phraseDraftRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.s,
+    marginBottom: spacing.s,
+  },
+  phraseDraftInput: {
+    flex: 1,
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: spacing.m,
+    paddingVertical: 12,
+    color: colors.text,
+    fontSize: fontSize.m,
+  },
+  phraseDraftDel: {
+    width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  phraseAddBtn: {
+    backgroundColor: colors.surface2,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.s,
+    paddingVertical: 12,
+    marginTop: spacing.xs,
+  },
   cardTitleRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   btnRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   fileRow: { flexDirection: "row", alignItems: "center", gap: 6 },

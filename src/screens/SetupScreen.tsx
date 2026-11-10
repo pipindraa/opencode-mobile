@@ -45,7 +45,7 @@ export default function SetupScreen({ initialURL, initialPassword, onSave, onCan
   // — быстрые фразы: общие для обоих серверов, чипы над полем ввода в чате —
   const [phrases, setPhrases] = useState<string[]>([]);
   const [phraseEdit, setPhraseEdit] = useState(false);
-  const [phraseDraft, setPhraseDraft] = useState("");
+  const [phraseDraft, setPhraseDraft] = useState<string[]>([]);
 
   const DEFAULT_PHRASES = ["что сделал", "продолжай", "проверь ошибки", "подведи итог"];
 
@@ -55,11 +55,7 @@ export default function SetupScreen({ initialURL, initialPassword, onSave, onCan
   }, []);
 
   const savePhrases = async () => {
-    const list = phraseDraft
-      .split("\n")
-      .map((x) => x.trim())
-      .filter(Boolean)
-      .slice(0, 12);
+    const list = phraseDraft.map((x) => x.trim()).filter(Boolean).slice(0, 12);
     setPhrases(list);
     setPhraseEdit(false);
     try {
@@ -322,7 +318,7 @@ export default function SetupScreen({ initialURL, initialPassword, onSave, onCan
         <Pressable
           style={({ pressed }) => [s.btnGhost, pressed && { opacity: 0.85 }]}
           onPress={() => {
-            setPhraseDraft(phrases.join("\n"));
+            setPhraseDraft(phrases.length > 0 ? [...phrases] : [""]);
             setPhraseEdit(true);
           }}
         >
@@ -333,23 +329,55 @@ export default function SetupScreen({ initialURL, initialPassword, onSave, onCan
         </Pressable>
       </ScrollView>
 
-      {/* быстрые фразы: редактор (по одной на строку) */}
+      {/* быстрые фразы: редактор — каждая фраза отдельной строкой */}
       <Modal visible={phraseEdit} transparent animationType="slide" onRequestClose={() => setPhraseEdit(false)}>
         <View style={s.overlay}>
           <View style={s.phraseModal}>
             <Text style={s.sheetTitle}>Быстрые фразы</Text>
             <Text style={s.hint}>
-              По одной фразе на строку (до 12). Тап по чипу над полем ввода в чате дописывает фразу
-              к сообщению. Чтобы удалить фразу — убери её строку.
+              Тап по чипу над полем ввода в чате дописывает фразу к сообщению. Убери строку, чтобы
+              удалить фразу.
             </Text>
-            <TextInput
-              style={[s.input, { height: 150, textAlignVertical: "top" }]}
-              value={phraseDraft}
-              onChangeText={setPhraseDraft}
-              multiline
-              placeholder={"что сделал\nпродолжай\nпроверь ошибки"}
-              placeholderTextColor={colors.textDim}
-            />
+            <ScrollView style={{ maxHeight: 300 }}>
+              {phraseDraft.map((p, i) => (
+                <View key={i} style={s.phraseDraftRow}>
+                  <TextInput
+                    style={s.phraseDraftInput}
+                    value={p}
+                    onChangeText={(t) =>
+                      setPhraseDraft((prev) => prev.map((x, j) => (j === i ? t : x)))
+                    }
+                    placeholder={"например: проверь ошибки"}
+                    placeholderTextColor={colors.textDim}
+                    returnKeyType={i < phraseDraft.length - 1 ? "next" : "done"}
+                    onSubmitEditing={() => {
+                      if (i < phraseDraft.length - 1) return;
+                      if (phraseDraft.length < 12) setPhraseDraft((prev) => [...prev, ""]);
+                    }}
+                  />
+                  {phraseDraft.length > 1 && (
+                    <Pressable
+                      style={s.phraseDraftDel}
+                      onPress={() => setPhraseDraft((prev) => prev.filter((_, j) => j !== i))}
+                      hitSlop={8}
+                    >
+                      <Ionicons name="close-circle" size={20} color={colors.danger} />
+                    </Pressable>
+                  )}
+                </View>
+              ))}
+            </ScrollView>
+            {phraseDraft.length < 12 && (
+              <Pressable
+                style={({ pressed }) => [s.phraseAddBtn, pressed && { opacity: 0.85 }]}
+                onPress={() => setPhraseDraft((prev) => [...prev, ""])}
+              >
+                <View style={s.ghostRow}>
+                  <Ionicons name="add-circle-outline" size={18} color={colors.text} />
+                  <Text style={s.btnGhostText}>Добавить фразу</Text>
+                </View>
+              </Pressable>
+            )}
             <Pressable style={s.btn} onPress={savePhrases}>
               <Text style={s.btnText}>Сохранить</Text>
             </Pressable>
@@ -505,5 +533,38 @@ const s = StyleSheet.create({
   hint: {
     color: colors.textDim,
     fontSize: fontSize.s,
+  },
+  // редактор фраз: каждая фраза — отдельная строка (TextInput + крестик удаления)
+  phraseDraftRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.s,
+    marginBottom: spacing.s,
+  },
+  phraseDraftInput: {
+    flex: 1,
+    backgroundColor: colors.bg,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: spacing.m,
+    paddingVertical: 12,
+    color: colors.text,
+    fontSize: fontSize.m,
+  },
+  phraseDraftDel: {
+    width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  phraseAddBtn: {
+    backgroundColor: colors.surface2,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: 10,
+    alignItems: "center",
+    paddingVertical: 12,
+    marginTop: spacing.xs,
   },
 });
