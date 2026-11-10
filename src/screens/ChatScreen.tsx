@@ -14,6 +14,7 @@ import {
   Animated,
   Alert,
   Dimensions,
+  PixelRatio,
   Keyboard,
   KeyboardEvent,
   ScrollView,
@@ -185,10 +186,22 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   const [phrases, setPhrases] = useState<string[]>([]);
   const [phraseEdit, setPhraseEdit] = useState(false);
   const [phraseDraft, setPhraseDraft] = useState<string[]>([]);
-  /** фактическая высота чипа (onLayout) — строке задаём её явно: горизонтальный
-   *  ScrollView сам неправильно меряет высоту при крупном системном шрифте
-   *  (font_scale ~3.5) и резал чипы снизу (баг из 1.7.x) */
-  const [chipH, setChipH] = useState(0);
+  /** явная высота чипов — считается СИНХРОННО из системного масштаба шрифта,
+   *  без onLayout (пробник 1.7.5 не срабатывал: onLayout не приходил, lineH
+   *  оставался 0, строки откатывались на авто-высоту и клипались до ~30px).
+   *  PixelRatio.getFontScale() — это и есть системный font_scale Android
+   *  («размер текста», у владельца телефона 1.1). Горизонтальные ScrollView
+   *  сами неправильно считают авто-высоту (баг 1.7.2–1.7.4), поэтому высота
+   *  задаётся явно:
+   *   lineH  = высота строки шрифта fontSize.s: шрифт × 1.4 (линейный
+   *            интервал шрифтов Android ~1.2-1.4 + запас, чтобы текст
+   *            никогда не резался ни при каком font_scale);
+   *   chipH  = весь чип. ВАЖНО: box-model RN — border-box, `height` ВКЛЮЧАЕТ
+   *            padding и рамку. Значит height чипа = строка + paddingVertical
+   *            6*2 + рамка 1*2 = lineH + 14 (это ОБЩАЯ высота, не содержимое);
+   *   строка (HVS/инфо-строка) = чип + отступ строки (spacing.xs). */
+  const lineH = Math.max(Math.ceil(fontSize.s * PixelRatio.getFontScale() * 1.4), 18);
+  const chipH = lineH + 14;
   // — файлы сессии (что агент изменил/создал) —
   const [files, setFiles] = useState<{ path: string; last: number }[] | null>(null);
   const [fileBusy, setFileBusy] = useState<string | null>(null);
@@ -1261,22 +1274,24 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         </View>
       )}
 
-      {/* инфо-строка: селекторы (модель/агент/файлы) — скроллятся, токены — всегда видны справа */}
-      <View style={s.infoRow}>
+      {/* инфо-строка: селекторы (модель/агент/файлы) — скроллятся, токены — всегда видны справа.
+          Высота чипов и строки явная (chipH из font_scale) — авто-высота
+          горизонтального ScrollView сжимается до ~30px и клипает чипы */}
+      <View style={[s.infoRow, { height: chipH + spacing.xs }]}>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          style={{ flex: 1 }}
+          style={{ flex: 1, height: chipH }}
           contentContainerStyle={{ gap: spacing.s }}
         >
-          <Pressable style={[s.chip, s.chipModel]} onPress={() => { loadModels(); setSheet("model"); }}>
+          <Pressable style={[s.chip, s.chipModel, { height: chipH }]} onPress={() => { loadModels(); setSheet("model"); }}>
             <View style={s.chipRow}>
               <Ionicons name="hardware-chip-outline" size={14} color={colors.textDim} />
               <Text style={[s.chipText, { flexShrink: 1 }]} numberOfLines={1}>{modelLabel}</Text>
               <Ionicons name="chevron-down" size={12} color={colors.textDim} />
             </View>
           </Pressable>
-          <Pressable style={s.chip} onPress={() => { loadAgents(); setSheet("agent"); }}>
+          <Pressable style={[s.chip, { height: chipH }]} onPress={() => { loadAgents(); setSheet("agent"); }}>
             <View style={s.chipRow}>
               <Ionicons name="person-circle-outline" size={14} color={colors.textDim} />
               <Text style={s.chipText} numberOfLines={1}>{agentLabel}</Text>
@@ -1284,7 +1299,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
             </View>
           </Pressable>
           {serverKind === "opencode" && (
-            <Pressable style={s.chip} onPress={openFiles}>
+            <Pressable style={[s.chip, { height: chipH }]} onPress={openFiles}>
               <View style={s.chipRow}>
                 <Ionicons name="folder-outline" size={14} color={colors.textDim} />
                 <Text style={s.chipText} numberOfLines={1}>Файлы</Text>
@@ -1292,7 +1307,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
             </Pressable>
           )}
         </ScrollView>
-        <Pressable style={[s.chip, s.chipFixed]} onPress={() => { loadContext(); setSheet("ctx"); }}>
+        <Pressable style={[s.chip, s.chipFixed, { height: chipH }]} onPress={() => { loadContext(); setSheet("ctx"); }}>
           <View style={s.chipRow}>
             <Ionicons name="stats-chart-outline" size={14} color={colors.textDim} />
             <Text style={s.chipText} numberOfLines={1}>{tokLabel}</Text>
@@ -1692,17 +1707,13 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          style={[s.phraseRow, chipH > 0 && { height: chipH + spacing.xs }]}
+          style={[s.phraseRow, { height: chipH + spacing.xs }]}
           contentContainerStyle={{ gap: spacing.s, paddingHorizontal: spacing.l, alignItems: "center" }}
         >
           {phrases.map((p, i) => (
             <Pressable
               key={i}
-              style={s.phraseChip}
-              onLayout={(e) => {
-                const h = Math.round(e.nativeEvent.layout.height);
-                if (h > 0) setChipH(h);
-              }}
+              style={[s.phraseChip, { height: chipH }]}
               onPress={() => applyPhrase(p)}
             >
               <Ionicons name="chatbubble-ellipses-outline" size={13} color={colors.textDim} />
@@ -1710,7 +1721,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
             </Pressable>
           ))}
           <Pressable
-            style={s.phraseChip}
+            style={[s.phraseChip, { height: chipH }]}
             onPress={() => {
               setPhraseDraft(phrases.length > 0 ? [...phrases] : [""]);
               setPhraseEdit(true);
@@ -2471,10 +2482,11 @@ const s = StyleSheet.create({
     paddingVertical: 8,
   },
   connText: { color: colors.warn, fontSize: fontSize.s, flex: 1 },
-  // строка чипов — ВЫСОТА ЯВНАЯ (chipH из onLayout первого чипа + paddingBottom).
-  // Авто-высота горизонтального ScrollView при крупном системном шрифте (font_scale
-  // ~3.5) меряется меньше фактического чипа → низ чипов резался прямой линией
-  // (баг из 1.7.2/1.7.3: сначала maxHeight:48, потом и без него).
+  // строка чипов — ВЫСОТА ЯВНАЯ (chipH + paddingBottom), chipH считается от
+  // фактической высоты строки текста (пробник в начале render). Авто-высота
+  // горизонтального ScrollView в флекс-колонке меряется ~30px и клипала чипы
+  // (баг 1.7.2–1.7.4: maxHeight, потом авто-высота, потом onLayout самого
+  // чипа — он мерялся уже внутри сломанной строки и возвращал ту же ошибку).
   phraseRow: { paddingBottom: spacing.xs },
   phraseChip: {
     flexDirection: "row",
