@@ -31,6 +31,7 @@ import Clipboard from "@react-native-clipboard/clipboard";
 import { OpenCodeApi, RenderMessage, RenderPart, Decision, ServerKind, PromptFile, basicAuthHeader, QuestionForm } from "../api";
 import { subscribeSession, BusEvent, PermissionRequest } from "../events";
 import { AsyncStorage } from "../store";
+import ReorderList from "../components/ReorderList";
 import { colors, spacing, fontSize } from "../theme";
 import { Ionicons } from "@expo/vector-icons";
 
@@ -162,7 +163,9 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   const [mq, setMq] = useState("");
   const [expandedModel, setExpandedModel] = useState<string | null>(null);
   const [ctxCount, setCtxCount] = useState<number | null>(null);
-  const [favs, setFavs] = useState<Set<string>>(new Set());
+  /** избранное моделей: ПОРЯДОК массива = порядок секции (перетаскивание ручкой) */
+  const [favs, setFavs] = useState<string[]>([]);
+  const hasFav = (k: string) => favs.includes(k);
   /** название чата из сессии — в заголовке вместо имени пользователя */
   const [sessionTitle, setSessionTitle] = useState("");
   /** когда агент начал текущий запрос (мс) — для таймера «работает 12с» */
@@ -248,14 +251,15 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     (async () => {
       const device = await AsyncStorage.getFavorites().catch(() => [] as string[]);
       if (serverKind === "omnirush") {
-        setFavs(new Set(device));
+        setFavs([...new Set(device)]);
         return;
       }
       const st = await api.modelState().catch(() => ({}) as any);
       const fromServer = Array.isArray(st?.favorite)
         ? st.favorite.map((x: any) => `${x?.providerID}/${x?.modelID}`).filter((k: string) => k && k !== "/")
         : [];
-      setFavs(new Set([...device, ...fromServer]));
+      // дедупликация; порядок: телефонный, новые серверные — в конец
+      setFavs([...new Set([...device, ...fromServer])]);
     })();
   }, [api, serverKind]);
 
@@ -319,12 +323,10 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
 
   const toggleFav = async (m: ModelRow) => {
     const k = modelKey(m);
-    const next = new Set(favs);
-    if (next.has(k)) next.delete(k);
-    else next.add(k);
+    const next = favs.includes(k) ? favs.filter((x) => x !== k) : [...favs, k];
     setFavs(next);
     try {
-      await AsyncStorage.saveFavorites([...next]);
+      await AsyncStorage.saveFavorites(next);
     } catch {
       /* ignore */
     }
@@ -335,15 +337,26 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       const fav = Array.isArray(st?.favorite) ? st.favorite.slice() : [];
       const [p, mid] = k.split("/");
       const idx = fav.findIndex((x: any) => String(x?.providerID) === p && String(x?.modelID) === mid);
-      if (next.has(k) && idx < 0) fav.unshift({ providerID: p, modelID: mid });
-      if (!next.has(k) && idx >= 0) fav.splice(idx, 1);
+      if (favs.includes(k) && idx < 0) fav.unshift({ providerID: p, modelID: mid });
+      if (!favs.includes(k) && idx >= 0) fav.splice(idx, 1);
       if (idx < 0 || fav.length !== st?.favorite?.length) {
         st.favorite = fav;
         await api.writeModelState(st);
       }
     } catch {
-      /* сервер недоступен — телефонный Set уже сохранён */
+      /* сервер недоступен — телефонный список уже сохранён */
     }
+  };
+
+  /** новый порядок избранного (ReorderList на отпускании).
+      Показанные могут быть ПОДМНОЖЕСТВОМ (поиск / модель ещё не в списке):
+      скрытые ключи держим на своих местах, показанные — в новый порядок */
+  const onFavsReorder = (shownKeys: string[]) => {
+    const shownSet = new Set(shownKeys);
+    let i = 0;
+    const next = favs.map((k) => (shownSet.has(k) ? shownKeys[i++] : k));
+    setFavs(next);
+    AsyncStorage.saveFavorites(next).catch(() => {});
   };
 
   const loadModels = async () => {
@@ -385,22 +398,19 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     else applyModel({ id: m.id, providerID: m.providerID });
   };
 
-  // строки листа моделей: заголовки провайдеров + favorites-секция
+  // строки листа моделей: только провайдеры (избранное — отдельно, ReorderList).
+  // favorites исключены, чтобы не дублировать: у них своя секция с ручкой.
   const modelRows = (() => {
     const q = mq.trim().toLowerCase();
     const filtered = models.filter((m) => (m.name + " " + m.providerID).toLowerCase().includes(q));
-    const favMore = filtered.filter((m) => favs.has(modelKey(m)));
     const byProvider = new Map<string, ModelRow[]>();
     for (const m of filtered) {
+      if (hasFav(modelKey(m))) continue; // в секции «Избранное» выше
       const arr = byProvider.get(m.providerID) ?? [];
       arr.push(m);
       byProvider.set(m.providerID, arr);
     }
-    const rows: ({ kind: "hdr"; label: string; fav?: boolean } | { kind: "mdl"; m: ModelRow })[] = [];
-    if (favMore.length > 0) {
-      rows.push({ kind: "hdr", label: "Избранное", fav: true });
-      for (const m of favMore) rows.push({ kind: "mdl", m });
-    }
+    const rows: ({ kind: "hdr"; label: string } | { kind: "mdl"; m: ModelRow })[] = [];
     const provs = [...byProvider.keys()].sort((a, b) => a.localeCompare(b));
     for (const p of provs) {
       rows.push({ kind: "hdr", label: p });
@@ -409,6 +419,72 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
     }
     return rows;
   })();
+  /** строки моделей из избранного, ПОРЯДОК favs (для ReorderList в шапке листа) */
+  const favModels = (() => {
+    const q = mq.trim().toLowerCase();
+    const byKey = new Map(models.map((m) => [modelKey(m), m]));
+    return favs
+      .filter((k) => byKey.has(k))
+      .map((k) => byKey.get(k)!)
+      .filter((m) => (m.name + " " + m.providerID).toLowerCase().includes(q));
+  })();
+  /** карточка модели (общая для секции избранного и списка провайдеров) */
+  const renderModelCard = (m: ModelRow, handleProps?: any) => {
+    const k = modelKey(m);
+    const activeRow = String(cur?.id) === m.id && String(cur?.providerID) === m.providerID;
+    const activeVariant = activeRow && String(cur?.variant ?? "") !== "";
+    const isFav = hasFav(k);
+    const expanded = expandedModel === k;
+    return (
+      <View>
+        <View style={[s.card, { flexDirection: "row", alignItems: "center", marginHorizontal: 0, paddingVertical: spacing.s }, activeRow && { borderColor: colors.accent }]}>
+          {handleProps && (
+            <View
+              {...handleProps}
+              style={{ paddingRight: spacing.xs, justifyContent: "center" }}
+              accessibilityLabel="Перетащить"
+            >
+              <Ionicons name="reorder-three" size={20} color={colors.textDim} />
+            </View>
+          )}
+          <Pressable style={{ flex: 1 }} onPress={() => pressModelRow(m)}>
+            <View style={s.cardTitleRow}>
+              {activeRow && <Ionicons name="checkmark" size={15} color={colors.ok} />}
+              {!activeRow && m.variants.length > 0 && (
+                <Ionicons name={expanded ? "chevron-down" : "chevron-forward"} size={14} color={colors.textDim} />
+              )}
+              <Text style={s.cardTitle} numberOfLines={1}>
+                {m.name}
+              </Text>
+            </View>
+            <Text style={s.cardDir} numberOfLines={1}>
+              {m.providerID}
+              {activeVariant
+                ? ` · режим: ${String(cur?.variant)}`
+                : m.variants.length > 0
+                ? " · режимы: " + m.variants.join(", ")
+                : ""}
+            </Text>
+          </Pressable>
+          <Pressable hitSlop={6} style={{ paddingHorizontal: spacing.m }} onPress={() => toggleFav(m)}>
+            <Ionicons name={isFav ? "star" : "star-outline"} size={20} color={isFav ? "#f5b73e" : colors.textDim} />
+          </Pressable>
+        </View>
+        {expanded && m.variants.length > 0 && (
+          <View style={s.variantRow}>
+            <Pressable style={s.variantChip} onPress={() => applyModel({ id: m.id, providerID: m.providerID })}>
+              <Text style={s.variantText}>default</Text>
+            </Pressable>
+            {m.variants.map((v) => (
+              <Pressable key={v} style={s.variantChip} onPress={() => applyModel({ id: m.id, providerID: m.providerID, variant: v })}>
+                <Text style={s.variantText}>{v}</Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+      </View>
+    );
+  };
   const applyAgent = async (agentID: string) => {
     try {
       await api.setSessionAgent(sessionID, agentID);
@@ -1709,72 +1785,41 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                   placeholderTextColor={colors.textDim}
                   autoCapitalize="none"
                 />
-                <FlatList
-                  data={modelRows}
-                  keyExtractor={(item, i) => String(i)}
-                  style={{ maxHeight: 380 }}
-                  ItemSeparatorComponent={() => <View style={{ height: spacing.xs }} />}
-                  renderItem={({ item }) => {
-                    if (item.kind === "hdr") {
-                      return item.fav ? (
-                        <View style={s.secHdrRow}>
-                          <Ionicons name="star" size={12} color="#f5b73e" />
-                          <Text style={s.secHdr}>{item.label}</Text>
-                        </View>
-                      ) : (
-                        <Text style={s.secHdr}>{item.label}</Text>
-                      );
-                    }
-                    const m = item.m;
-                    const k = modelKey(m);
-                    const activeRow = String(cur?.id) === m.id && String(cur?.providerID) === m.providerID;
-                    const activeVariant = activeRow && String(cur?.variant ?? "") !== "";
-                    const isFav = favs.has(k);
-                    const expanded = expandedModel === k;
-                    return (
-                      <View>
-                        <View style={[s.card, { flexDirection: "row", alignItems: "center", marginHorizontal: 0, paddingVertical: spacing.s }, activeRow && { borderColor: colors.accent }]}>
-                          <Pressable style={{ flex: 1 }} onPress={() => pressModelRow(m)}>
-                            <View style={s.cardTitleRow}>
-                              {activeRow && <Ionicons name="checkmark" size={15} color={colors.ok} />}
-                              {!activeRow && m.variants.length > 0 && (
-                                <Ionicons name={expanded ? "chevron-down" : "chevron-forward"} size={14} color={colors.textDim} />
-                              )}
-                              <Text style={s.cardTitle} numberOfLines={1}>
-                                {m.name}
-                              </Text>
-                            </View>
-                            <Text style={s.cardDir} numberOfLines={1}>
-                              {m.providerID}
-                              {activeVariant
-                                ? ` · режим: ${String(cur?.variant)}`
-                                : m.variants.length > 0
-                                ? " · режимы: " + m.variants.join(", ")
-                                : ""}
-                            </Text>
-                          </Pressable>
-                          <Pressable hitSlop={6} style={{ paddingHorizontal: spacing.m }} onPress={() => toggleFav(m)}>
-                            <Ionicons name={isFav ? "star" : "star-outline"} size={20} color={isFav ? "#f5b73e" : colors.textDim} />
-                          </Pressable>
-                        </View>
-                        {expanded && m.variants.length > 0 && (
-                          <View style={s.variantRow}>
-                            <Pressable style={s.variantChip} onPress={() => applyModel({ id: m.id, providerID: m.providerID })}>
-                              <Text style={s.variantText}>default</Text>
-                            </Pressable>
-                            {m.variants.map((v) => (
-                              <Pressable key={v} style={s.variantChip} onPress={() => applyModel({ id: m.id, providerID: m.providerID, variant: v })}>
-                                <Text style={s.variantText}>{v}</Text>
-                              </Pressable>
-                            ))}
-                          </View>
-                        )}
+                <ScrollView style={{ maxHeight: 520 }} contentContainerStyle={{ paddingBottom: spacing.s }}>
+                  {/* избранное — сверху, ручка ⋮ перетаскивает (порядок = порядок favs) */}
+                  {favModels.length > 0 && (
+                    <>
+                      <View style={s.secHdrRow}>
+                        <Ionicons name="star" size={12} color="#f5b73e" />
+                        <Text style={s.secHdr}>Избранное</Text>
                       </View>
-                    );
-                  }}
-                  ListEmptyComponent={<Text style={s.empty}>Ничего не нашлось</Text>}
-                />
-                <Text style={s.hint}>Звезда — добавить модель в избранное, стрелка — раскрыть режимы reasoning.</Text>
+                      <ReorderList
+                        items={favModels}
+                        keyOf={modelKey}
+                        onReorder={(ms) => onFavsReorder(ms.map(modelKey))}
+                        gap={spacing.xs}
+                        renderItem={(m, ctx) => renderModelCard(m, ctx.handleProps)}
+                      />
+                    </>
+                  )}
+                  <FlatList
+                    data={modelRows}
+                    keyExtractor={(item, i) => String(i)}
+                    style={{ flexGrow: 0 }}
+                    ItemSeparatorComponent={() => <View style={{ height: spacing.xs }} />}
+                    renderItem={({ item }) =>
+                      item.kind === "hdr" ? <Text style={s.secHdr}>{item.label}</Text> : renderModelCard(item.m)
+                    }
+                    ListEmptyComponent={
+                      favModels.length === 0 && modelRows.length === 0 ? (
+                        <Text style={s.empty}>Ничего не нашлось</Text>
+                      ) : undefined
+                    }
+                  />
+                </ScrollView>
+                <Text style={s.hint}>
+                  Звезда — добавить модель в избранное; ручка ⋮ в избранном — перетащить, чтобы поменять порядок; стрелка — раскрыть режимы reasoning.
+                </Text>
               </>
             )}
             {sheet === "agent" && (

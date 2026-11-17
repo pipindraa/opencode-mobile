@@ -5,6 +5,7 @@ import {
   Pressable,
   StyleSheet,
   FlatList,
+  ScrollView,
   ActivityIndicator,
   RefreshControl,
   Modal,
@@ -16,6 +17,7 @@ import {
 } from "react-native";
 import { OpenCodeApi, ServerKind } from "../api";
 import { AsyncStorage } from "../store";
+import ReorderList from "../components/ReorderList";
 import { colors, spacing, fontSize } from "../theme";
 import { Ionicons } from "@expo/vector-icons";
 
@@ -177,6 +179,7 @@ function SessionRow({
   onLongPress,
   onFav,
   onAction,
+  handleProps,
 }: {
   it: SessionItem;
   title: string;
@@ -187,6 +190,8 @@ function SessionRow({
   onLongPress?: () => void;
   onFav: () => void;
   onAction: () => void;
+  /** пропсы ручки перетаскивания (из ReorderList) — только для избранного */
+  handleProps?: any;
 }) {
   const swipeApi = useRef<{ open: () => boolean; close: () => void } | null>(null);
   const card = (
@@ -202,6 +207,15 @@ function SessionRow({
       }}
       onLongPress={onLongPress}
     >
+      {handleProps && (
+        <View
+          {...handleProps}
+          style={{ paddingRight: spacing.xs, justifyContent: "center" }}
+          accessibilityLabel="Перетащить"
+        >
+          <Ionicons name="reorder-three" size={20} color={colors.textDim} />
+        </View>
+      )}
       {status}
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: spacing.xs }}>
@@ -236,7 +250,8 @@ export default function HomeScreen({ api, serverKind, conn, onOpen, onSettings, 
   const [projects, setProjects] = useState<{ directory: string; title: string }[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [activeCount, setActiveCount] = useState(0);
-  const [favs, setFavs] = useState<Set<string>>(new Set());
+  const [favs, setFavs] = useState<string[]>([]);
+  const hasFav = (id: string) => favs.includes(id);
   /** поиск по названию и папке */
   const [q, setQ] = useState("");
   /** фильтр списка: все / активные / закрытые / архив (архив — только OpenCode) */
@@ -252,6 +267,16 @@ export default function HomeScreen({ api, serverKind, conn, onOpen, onSettings, 
 
   const isUnread = (id: string) => (unread?.has(id) ?? false) || justDone.has(id);
 
+  // статус кружок карточки: работает (спиннер) > ошибка (красная) > непрочитано (синяя)
+  const statusFor = (it: SessionItem) =>
+    it.active ? (
+      <ActivityIndicator size="small" color={colors.accent} style={s.statusDot} />
+    ) : errors?.has(it.id) ? (
+      <View style={[s.statusDot, { backgroundColor: colors.danger }]} />
+    ) : isUnread(it.id) ? (
+      <View style={[s.statusDot, { backgroundColor: colors.accent }]} />
+    ) : null;
+
   const filtered = useMemo(() => {
     let list = sessions;
     if (filter === "active") list = list.filter((x) => x.active);
@@ -261,29 +286,47 @@ export default function HomeScreen({ api, serverKind, conn, onOpen, onSettings, 
     return list;
   }, [sessions, q, filter]);
 
+  // избранное в текущей выборке — секция сверху; ПОРЯДОК = порядок массива favs
+  // (именно его меняет перетаскивание), показываем только то, что попало в выборку
+  const favById = new Map(filtered.map((it) => [it.id, it]));
+  const favsList = favs
+    .map((id) => favById.get(id))
+    .filter((it): it is SessionItem => it !== undefined);
+
   // при смене сервера сбрасываем фильтр (архив у Omnirush не существует)
   useEffect(() => {
     setFilter("all");
   }, [serverKind]);
 
-  // избранное чатов этого сервера — живёт только на телефоне
+  // избранное чатов этого сервера — живёт только на телефоне;
+  // ПОРЯДОК массива = порядок секции «Избранное» (перетаскивание ручкой)
   useEffect(() => {
     (async () => {
       const ids = await AsyncStorage.getChatFavs(serverKind).catch(() => [] as string[]);
-      setFavs(new Set(ids));
+      // дедупликация (ручной JSON / старая версия могли дать повторы)
+      setFavs([...new Set(ids)]);
     })();
   }, [serverKind]);
 
   const toggleFav = async (id: string) => {
-    const next = new Set(favs);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
+    const next = favs.includes(id) ? favs.filter((x) => x !== id) : [...favs, id];
     setFavs(next);
     try {
-      await AsyncStorage.saveChatFavs(serverKind, [...next]);
+      await AsyncStorage.saveChatFavs(serverKind, next);
     } catch {
       /* ignore */
     }
+  };
+
+  /** новый порядок секции «Избранное» (ReorderList на отпускании).
+      Показанные могут быть ПОДМНОЖЕСТВОМ (фильтр/поиск): скрытые держим
+      на своих местах, показанные ставим в новый относительный порядок */
+  const onFavsReorder = (shownIds: string[]) => {
+    const shownSet = new Set(shownIds);
+    let i = 0;
+    const next = favs.map((k) => (shownSet.has(k) ? shownIds[i++] : k));
+    setFavs(next);
+    AsyncStorage.saveChatFavs(serverKind, next).catch(() => {});
   };
 
   const openRustDesk = () => {
@@ -507,80 +550,97 @@ export default function HomeScreen({ api, serverKind, conn, onOpen, onSettings, 
       {loading && sessions.length === 0 ? (
         <ActivityIndicator color={colors.accent} style={{ marginTop: spacing.xl }} />
       ) : (
-        <FlatList
-          data={(() => {
-            const rows: ({ kind: "h"; key: string; label: string; fav?: boolean } | { kind: "s"; key: string; item: SessionItem })[] = [];
-            // избранное — закреплено сверху отдельной секцией (как у моделей)
-            const favsList = filtered.filter((it) => favs.has(it.id));
-            if (favsList.length > 0) {
-              rows.push({ kind: "h", key: "h_favs", label: "Избранное", fav: true });
-              for (const it of favsList) rows.push({ kind: "s", key: it.id, item: it });
-            }
-            let last = "";
-            for (const it of filtered) {
-              if (favs.has(it.id)) continue;
-              const label = dayLabel(it.timeCreated);
-              if (label !== last) {
-                last = label;
-                rows.push({ kind: "h", key: "h_" + label, label });
-              }
-              rows.push({ kind: "s", key: it.id || String(rows.length), item: it });
-            }
-            return rows;
-          })()}
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={{ paddingBottom: spacing.xl }}
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={colors.accent} />
           }
-          contentContainerStyle={{ paddingBottom: spacing.xl }}
-          ItemSeparatorComponent={() => <View style={{ height: spacing.s }} />}
-          renderItem={({ item }) => {
-            if (item.kind === "h") {
-              return item.fav ? (
-                <View style={s.favHdrRow}>
-                  <Ionicons name="star" size={13} color="#f5b73e" />
-                  <Text style={s.dayHdr}>{item.label}</Text>
-                </View>
-              ) : (
-                <Text style={s.dayHdr}>{item.label}</Text>
-              );
-            }
-            const it = item.item;
-            const isFav = favs.has(it.id);
-            // статус-кружок: работает (спиннер) > ошибка (красная) > непрочитано (синяя)
-            const status = it.active ? (
-              <ActivityIndicator size="small" color={colors.accent} style={s.statusDot} />
-            ) : errors?.has(it.id) ? (
-              <View style={[s.statusDot, { backgroundColor: colors.danger }]} />
-            ) : isUnread(it.id) ? (
-              <View style={[s.statusDot, { backgroundColor: colors.accent }]} />
-            ) : null;
-            return (
-              <SessionRow
-                it={it}
-                title={titles?.[it.id] ?? it.title}
-                status={status}
-                isFav={isFav}
-                swipeAction={swipeAction}
-                onOpen={() => {
-                  setJustDone((prev) => (prev.has(it.id) ? new Set([...prev].filter((x) => x !== it.id)) : prev));
-                  onOpen(it.id, it.directory);
-                }}
-                onLongPress={serverKind === "opencode" ? () => setMenuFor(it) : undefined}
-                onFav={() => toggleFav(it.id)}
-                onAction={() => toggleArchive(it, filter !== "archived")}
+        >
+          {/* избранное — отдельно, с ручкой перетаскивания (порядок = порядок favs) */}
+          {favsList.length > 0 && (
+            <>
+              <View style={s.favHdrRow}>
+                <Ionicons name="star" size={13} color="#f5b73e" />
+                <Text style={s.dayHdr}>Избранное</Text>
+              </View>
+              <ReorderList
+                items={favsList}
+                keyOf={(it) => it.id}
+                onReorder={(its) => onFavsReorder(its.map((i) => i.id))}
+                gap={spacing.s}
+                renderItem={(it, ctx) => (
+                  <SessionRow
+                    it={it}
+                    title={titles?.[it.id] ?? it.title}
+                    status={statusFor(it)}
+                    isFav
+                    swipeAction={swipeAction}
+                    handleProps={ctx.handleProps}
+                    onOpen={() => {
+                      setJustDone((prev) => (prev.has(it.id) ? new Set([...prev].filter((x) => x !== it.id)) : prev));
+                      onOpen(it.id, it.directory);
+                    }}
+                    onLongPress={serverKind === "opencode" ? () => setMenuFor(it) : undefined}
+                    onFav={() => toggleFav(it.id)}
+                    onAction={() => toggleArchive(it, filter !== "archived")}
+                  />
+                )}
               />
-            );
-          }}
-          ListEmptyComponent={
-            <Text style={s.empty}>
-              {filter === "archived"
-                ? "Архив пуст. Свайпни карточку влево — сессия уйдёт сюда."
-                : serverKind === "omnirush"
-                ? "Чатов пока нет. Нажми «+» вверху, чтобы создать.\n\nЧаты из TUI Omnirush на ноуте появятся здесь автоматически."
-                : "Сессий пока нет. Нажми «+» вверху, чтобы создать.\n\nСессии, созданные в TUI на ноуте, тоже появятся здесь после обновления."}
-            </Text>
-          }
-        />
+            </>
+          )}
+          <FlatList
+            data={(() => {
+              const rows: ({ kind: "h"; key: string; label: string } | { kind: "s"; key: string; item: SessionItem })[] = [];
+              let last = "";
+              for (const it of filtered) {
+                if (hasFav(it.id)) continue;
+                const label = dayLabel(it.timeCreated);
+                if (label !== last) {
+                  last = label;
+                  rows.push({ kind: "h", key: "h_" + label, label });
+                }
+                rows.push({ kind: "s", key: it.id || String(rows.length), item: it });
+              }
+              return rows;
+            })()}
+            style={{ flexGrow: 0 }}
+            ItemSeparatorComponent={() => <View style={{ height: spacing.s }} />}
+            renderItem={({ item }) => {
+              if (item.kind === "h") {
+                return <Text style={s.dayHdr}>{item.label}</Text>;
+              }
+              const it = item.item;
+              return (
+                <SessionRow
+                  it={it}
+                  title={titles?.[it.id] ?? it.title}
+                  status={statusFor(it)}
+                  isFav={hasFav(it.id)}
+                  swipeAction={swipeAction}
+                  onOpen={() => {
+                    setJustDone((prev) => (prev.has(it.id) ? new Set([...prev].filter((x) => x !== it.id)) : prev));
+                    onOpen(it.id, it.directory);
+                  }}
+                  onLongPress={serverKind === "opencode" ? () => setMenuFor(it) : undefined}
+                  onFav={() => toggleFav(it.id)}
+                  onAction={() => toggleArchive(it, filter !== "archived")}
+                />
+              );
+            }}
+            ListEmptyComponent={
+              <Text style={s.empty}>
+                {favsList.length > 0
+                  ? "Все чаты в избранном."
+                  : filter === "archived"
+                  ? "Архив пуст. Свайпни карточку влево — сессия уйдёт сюда."
+                  : serverKind === "omnirush"
+                  ? "Чатов пока нет. Нажми «+» вверху, чтобы создать.\n\nЧаты из TUI Omnirush на ноуте появятся здесь автоматически."
+                  : "Сессий пока нет. Нажми «+» вверху, чтобы создать.\n\nСессии, созданные в TUI на ноуте, тоже появятся здесь после обновления."}
+              </Text>
+            }
+          />
+        </ScrollView>
       )}
 
       {/* меню карточки: долгий тап (только OpenCode — у форка нет архива/переименования/удаления) */}
