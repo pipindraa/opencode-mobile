@@ -28,7 +28,7 @@ import { File, Paths, Directory } from "expo-file-system";
 import { voiceNative } from "../voice";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import Clipboard from "@react-native-clipboard/clipboard";
-import { OpenCodeApi, RenderMessage, RenderPart, Decision, ServerKind, PromptFile, basicAuthHeader } from "../api";
+import { OpenCodeApi, RenderMessage, RenderPart, Decision, ServerKind, PromptFile, basicAuthHeader, QuestionForm } from "../api";
 import { subscribeSession, BusEvent, PermissionRequest } from "../events";
 import { AsyncStorage } from "../store";
 import { colors, spacing, fontSize } from "../theme";
@@ -144,6 +144,14 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   const [bubbles, setBubbles] = useState<ChatBubble[]>([]);
   const [busy, setBusy] = useState(false);
   const [perms, setPerms] = useState<PermCard[]>([]);
+  /** формы-вопросы (инструмент question) — отвечаются вариантами, не «разрешить/отклонить» */
+  const [forms, setForms] = useState<QuestionForm[]>([]);
+  /** выбранные ответы на форму: formID -> {qKey: [value...]} */
+  const [formAnswers, setFormAnswers] = useState<Record<string, Record<string, string[]>>>({});
+  /** форма, у которой открыт ввод своего ответа */
+  const [formCustomFor, setFormCustomFor] = useState<string | null>(null);
+  /** свои текстовые ответы на поля: key = `${formID}:${fieldKey}` */
+  const [formCustomText, setFormCustomText] = useState<Record<string, string>>({});
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -490,10 +498,11 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
 
   const pollState = useCallback(async () => {
     try {
-      const [active, pending, sess] = await Promise.all([
+      const [active, pending, sess, pendForms] = await Promise.all([
         api.sessionsActive().catch(() => [] as string[]),
         api.pendingPermissions().catch(() => [] as any[]),
         api.sessionInfo(sessionID).catch(() => null),
+        api.pendingForms().catch(() => [] as QuestionForm[]),
       ]);
       if (sess) {
         setInfo(sess);
@@ -506,6 +515,23 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       setBusySince((prev) => (isActive ? prev ?? Date.now() : null));
       const mine = pending.filter((p) => p.sessionID === sessionID && p.requestID);
       setPerms(mine);
+      const mineForms = pendForms.filter((f) => f.sessionID === sessionID);
+      setForms((prev) => {
+        // добавляем новые, удаляем те, что исчезли на сервере (ответили из TUI)
+        const merged = [...prev];
+        for (const f of mineForms) {
+          if (!merged.some((x) => x.id === f.id)) merged.push(f);
+        }
+        return merged.filter((x) => mineForms.some((f) => f.id === x.id));
+      });
+      // выбранные ответы — только для живых форм
+      setFormAnswers((prev) => {
+        const next: Record<string, Record<string, string[]>> = {};
+        for (const [id, ans] of Object.entries(prev)) {
+          if (mineForms.some((f) => f.id === id)) next[id] = ans;
+        }
+        return next;
+      });
     } catch {
       /* тихо, ошибка сети отобразится при следующем цикле */
     }
@@ -617,6 +643,17 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
         }
         case "permission-replied":
           setPerms((prev) => prev.filter((p) => p.requestID !== e.requestID));
+          break;
+        case "form": {
+          const f = e.form;
+          if (f.sessionID !== sessionID) break;
+          setForms((prev) => (prev.some((x) => x.id === f.id) ? prev : [...prev, f]));
+          setFormAnswers((prev) => (prev[f.id] ? prev : { ...prev, [f.id]: {} }));
+          break;
+        }
+        case "form-resolved":
+          // отвечена (отсюда или из TUI) / отменена — убираем карточку
+          setForms((prev) => prev.filter((x) => x.id !== e.formID));
           break;
         case "error":
           setError(e.message);
@@ -862,6 +899,79 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
       loadMessages();
     } catch (e: any) {
       setError(e?.message ?? String(e));
+    }
+  };
+
+  // — форма-вопрос: выбрать вариант / свой ответ, ответить или пропустить —
+  const setFormAnswer = (formID: string, key: string, value: string) => {
+    setFormAnswers((prev) => {
+      const cur = { ...(prev[formID] ?? {}) };
+      cur[key] = [value];
+      return { ...prev, [formID]: cur };
+    });
+    clearFormCustom(formID, key);
+  };
+
+  const toggleFormAnswer = (formID: string, key: string, value: string) => {
+    setFormAnswers((prev) => {
+      const cur = { ...(prev[formID] ?? {}) };
+      const list = cur[key] ?? [];
+      cur[key] = list.includes(value) ? list.filter((x) => x !== value) : [...list, value];
+      return { ...prev, [formID]: cur };
+    });
+    clearFormCustom(formID, key);
+  };
+
+  /** свой текст выбран — вариант отменяем (ответ: либо вариант, либо текст) */
+  const clearFormCustom = (formID: string, key: string) => {
+    const k = `${formID}:${key}`;
+    setFormCustomText((prev) => {
+      if (!prev[k]) return prev;
+      const next = { ...prev };
+      delete next[k];
+      return next;
+    });
+    setFormCustomFor((c) => (c === k ? null : c));
+  };
+
+  const answerForm = async (form: QuestionForm) => {
+    const ans = formAnswers[form.id] ?? {};
+    // только отвеченные поля (пустое — не отправляем: агент получит Unanswered).
+    // свой текст перекрывает выбранный вариант (как в TUI: либо вариант, либо ответ)
+    const body: Record<string, string[]> = {};
+    for (const f of form.fields) {
+      const custom = (formCustomText[`${form.id}:${f.key}`] ?? "").trim();
+      const opts = ans[f.key] ?? [];
+      const v = custom ? [custom] : opts;
+      if (v.length > 0) body[f.key] = v;
+    }
+    setForms((prev) => prev.filter((x) => x.id !== form.id));
+    setFormCustomFor((c) => (c === form.id ? null : c));
+    try {
+      await api.replyForm(sessionID, form.id, body);
+      busyRef.current = true;
+      setBusy(true);
+      await pollState();
+      loadMessages();
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+      // не потеряли форму при ошибке сети
+      setForms((prev) => (prev.some((x) => x.id === form.id) ? prev : [...prev, form]));
+    }
+  };
+
+  const skipForm = async (form: QuestionForm) => {
+    setForms((prev) => prev.filter((x) => x.id !== form.id));
+    setFormCustomFor((c) => (c === form.id ? null : c));
+    try {
+      await api.skipForm(sessionID, form.id);
+      busyRef.current = true;
+      setBusy(true);
+      await pollState();
+      loadMessages();
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+      setForms((prev) => (prev.some((x) => x.id === form.id) ? prev : [...prev, form]));
     }
   };
 
@@ -1191,7 +1301,7 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   const title = sessionTitle || directory.replace(/\\/g, "/").split("/").filter(Boolean).pop() || "сессия";
   /** сколько секунд уже работает агент — для плашки «работает 12с» */
   const busySec = busy && busySince ? Math.max(1, Math.round((Date.now() - busySince) / 1000)) : 0;
-  const statusText = perms.length > 0 ? "perm:ждёт твоего разрешения" : activity || "think:думает";
+  const statusText = perms.length > 0 ? "perm:ждёт твоего разрешения" : forms.length > 0 ? "perm:ждёт ответа на вопрос" : activity || "think:думает";
   /** вид статуса → иконка: инструмент / печатает / думает / разрешение / отправляю */
   const statusInfo = (() => {
     if (sending && !busy) return { icon: "paper-plane-outline" as const, color: colors.accent, text: "отправляю сообщение" };
@@ -1486,6 +1596,101 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
               </View>
             </View>
           ))}
+        </View>
+      )}
+
+      {/* вопросы агента (инструмент question): варианты + свой ответ.
+          Отвечаем form.reply — НЕ «разрешить/отклонить»: это форма, не разрешение */}
+      {forms.length > 0 && (
+        <View style={s.permWrap}>
+          {forms.map((f) => {
+            const ans = formAnswers[f.id] ?? {};
+            const hasAny = f.fields.some((fl) => {
+              const opts = ans[fl.key] ?? [];
+              const custom = (formCustomText[`${f.id}:${fl.key}`] ?? "").trim();
+              return opts.length > 0 || custom.length > 0;
+            });
+            return (
+              <View key={f.id} style={[s.permCard, { borderColor: colors.accent }]}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: spacing.s }}>
+                  <Ionicons name="help-circle-outline" size={16} color={colors.accent} />
+                  <Text style={{ color: colors.accent, fontWeight: "700" }}>Агент задаёт вопрос</Text>
+                </View>
+                {f.fields.map((fl) => {
+                  const multiple = fl.type === "multiselect";
+                  const sel = ans[fl.key] ?? [];
+                  const customKey = `${f.id}:${fl.key}`;
+                  const custom = (formCustomText[customKey] ?? "").trim();
+                  return (
+                    <View key={fl.key} style={{ marginBottom: spacing.m }}>
+                      <Text style={{ color: colors.text, fontWeight: "700", fontSize: fontSize.s }}>
+                        {fl.title || fl.description}
+                      </Text>
+                      {fl.description && fl.title ? (
+                        <Text style={{ color: colors.textDim, fontSize: fontSize.s, marginTop: 2 }}>{fl.description}</Text>
+                      ) : null}
+                      <View style={{ marginTop: spacing.s, gap: spacing.xs }}>
+                        {fl.options.map((o) => {
+                          const on = sel.includes(o.value) && custom.length === 0;
+                          return (
+                            <Pressable
+                              key={o.value}
+                              style={[s.formOpt, on && { backgroundColor: colors.accent, borderColor: colors.accent }]}
+                              onPress={() => (multiple ? toggleFormAnswer(f.id, fl.key, o.value) : setFormAnswer(f.id, fl.key, o.value))}
+                            >
+                              {multiple ? (
+                                <Ionicons name={on ? "checkbox" : "square-outline"} size={17} color={on ? "#fff" : colors.textDim} />
+                              ) : (
+                                <Ionicons name={on ? "radio-button-on" : "radio-button-off"} size={17} color={on ? "#fff" : colors.textDim} />
+                              )}
+                              <Text
+                                numberOfLines={1}
+                                style={{ flex: 1, color: on ? "#fff" : colors.text, fontSize: fontSize.s, fontWeight: "600" }}
+                              >
+                                {o.label}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                        {fl.custom && (
+                          formCustomFor === customKey ? (
+                            <TextInput
+                              style={s.formInput}
+                              placeholder="Свой ответ…"
+                              placeholderTextColor={colors.textDim}
+                              value={formCustomText[customKey] ?? ""}
+                              onChangeText={(t) => setFormCustomText((prev) => ({ ...prev, [customKey]: t }))}
+                              autoFocus
+                              onSubmitEditing={() => setFormCustomFor(null)}
+                            />
+                          ) : (
+                            <Pressable style={[s.formOpt, { backgroundColor: colors.surface2 }]} onPress={() => setFormCustomFor(customKey)}>
+                              <Ionicons name="create-outline" size={17} color={custom.length > 0 ? colors.accent : colors.textDim} />
+                              <Text numberOfLines={1} style={{ flex: 1, color: custom.length > 0 ? colors.text : colors.textDim, fontSize: fontSize.s }}>
+                                {custom.length > 0 ? custom : "Свой ответ…"}
+                              </Text>
+                            </Pressable>
+                          )
+                        )}
+                      </View>
+                    </View>
+                  );
+                })}
+                <View style={s.permRow}>
+                  <Pressable
+                    style={[s.permBtn, { backgroundColor: hasAny ? colors.accent : colors.surface2, opacity: hasAny ? 1 : 0.7 }]}
+                    disabled={!hasAny}
+                    onPress={() => answerForm(f)}
+                  >
+                    <Text style={[s.permBtnText, !hasAny && { color: colors.textDim }]}>Ответить</Text>
+                  </Pressable>
+                  <Pressable style={[s.permBtn, { backgroundColor: colors.surface2 }]} onPress={() => skipForm(f)}>
+                    <Text style={[s.permBtnText, { color: colors.textDim }]}>Пропустить</Text>
+                  </Pressable>
+                </View>
+              </View>
+            );
+          })}
         </View>
       )}
 
@@ -2334,6 +2539,27 @@ const s = StyleSheet.create({
     paddingVertical: 10,
   },
   permBtnText: { color: "#fff", fontWeight: "600", fontSize: fontSize.s },
+  formOpt: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.s,
+    backgroundColor: colors.surface2,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: spacing.m,
+    paddingVertical: 9,
+  },
+  formInput: {
+    backgroundColor: colors.surface2,
+    borderColor: colors.accent,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: spacing.m,
+    paddingVertical: 8,
+    color: colors.text,
+    fontSize: fontSize.s,
+  },
   inputRow: {
     flexDirection: "row",
     alignItems: "flex-end",

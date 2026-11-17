@@ -37,7 +37,7 @@
  *   permission.replied   {sessionID, requestID, reply}
  *   server.connected     {}
  */
-import { basicAuthHeader } from "./api";
+import { basicAuthHeader, type QuestionForm } from "./api";
 
 /** Разрешение, которое просит агент (payload permission.asked) */
 export interface PermissionRequest {
@@ -64,6 +64,9 @@ export type BusEvent =
   | { kind: "tool"; sessionID: string; messageID: string; id: string; state: "running" | "completed" | "error"; input?: any }
   | { kind: "permission"; request: PermissionRequest }
   | { kind: "permission-replied"; sessionID: string; requestID: string }
+  /** форма-вопрос (инструмент question): появилась / отвечена / отменена на сервере */
+  | { kind: "form"; form: QuestionForm }
+  | { kind: "form-resolved"; sessionID: string; formID: string }
   | { kind: "error"; sessionID: string; message: string }
   | { kind: "renamed"; sessionID: string; title: string }
   /** сообщения/части изменились — запросить свежие (message.updated и всё такое) */
@@ -367,6 +370,39 @@ class EventBus {
       case "permission.replied":
         if (sid && d?.requestID) this.emit({ kind: "permission-replied", sessionID: sid, requestID: String(d.requestID) });
         return;
+      // — формы-вопросы (инструмент question) —
+      case "form.created": {
+        const f = d?.form ?? d;
+        if (f?.id && Array.isArray(f?.fields) && f.fields.length > 0) {
+          this.emit({
+            kind: "form",
+            form: {
+              id: String(f.id),
+              sessionID: String(f.sessionID ?? sid),
+              title: String(f.title ?? "Вопросы"),
+              fields: f.fields.map((fl: any) => ({
+                key: String(fl?.key ?? ""),
+                title: String(fl?.title ?? ""),
+                description: String(fl?.description ?? ""),
+                type: String(fl?.type ?? "string"),
+                custom: !!fl?.custom,
+                options: Array.isArray(fl?.options)
+                  ? fl.options.map((o: any) => ({
+                      value: String(o?.value ?? o?.label ?? ""),
+                      label: String(o?.label ?? o?.value ?? ""),
+                      description: typeof o?.description === "string" ? o.description : undefined,
+                    }))
+                  : [],
+              })),
+            },
+          });
+        }
+        return;
+      }
+      case "form.replied":
+      case "form.cancelled":
+        if (sid && d?.id) this.emit({ kind: "form-resolved", sessionID: sid, formID: String(d.id) });
+        return;
       case "session.error": {
         const msg =
           (typeof d?.error === "string" && d.error) ||
@@ -414,7 +450,8 @@ export function subscribeSession(
     }
     const sid = (e as { sessionID?: string }).sessionID;
     const reqSid = e.kind === "permission" ? (e as { request: PermissionRequest }).request.sessionID : undefined;
-    if (sid === sessionID || reqSid === sessionID) fn(e);
+    const formSid = e.kind === "form" ? (e as { form: { sessionID: string } }).form.sessionID : undefined;
+    if (sid === sessionID || reqSid === sessionID || formSid === sessionID) fn(e);
   });
 }
 

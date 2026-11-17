@@ -10,6 +10,28 @@ import { EncodingType } from "expo-file-system/legacy";
 
 export type Decision = "once" | "always" | "reject";
 
+/**
+ * Форма-вопрос: инструмент `question` НЕ ходит через разрешения — он создаёт
+ * FORM (SSE form.created). Каждый field — вопрос: options (варианты), type
+ * "string" (один) / "multiselect" (несколько), custom — можно свой ответ.
+ * Ответ — массив значений (labels вариантов ИЛИ свой текст) на ключ поля (q0, q1…).
+ * Подтверждено живым сервером 2.2.4 (reply → 204, агент продолжает).
+ */
+export interface QuestionField {
+  key: string;
+  title: string;
+  description: string;
+  type: string;
+  options: { value: string; label: string; description?: string }[];
+  custom?: boolean;
+}
+export interface QuestionForm {
+  id: string;
+  sessionID: string;
+  title: string;
+  fields: QuestionField[];
+}
+
 /** Какой сервер за API: OpenCode v2 или движок-форк Omnirush (мост на ноуте) */
 export type ServerKind = "opencode" | "omnirush";
 
@@ -651,6 +673,58 @@ class OpenCodeApi {
       method: "POST",
       json: { decision },
     });
+  }
+
+  /**
+   * Ожидающие формы-вопросы (инструмент question) этой сессии.
+   * Живой формат (подтверждено): {data: [{id, sessionID, title, fields: [
+   * {key, title, description, type, options: [{value,label}], custom}]}]}
+   */
+  async pendingForms(): Promise<QuestionForm[]> {
+    try {
+      const data = await this.req("/api/form");
+      return extractList(data)
+        .map((f: any) => ({
+          id: String(f?.id ?? f?.formID ?? ""),
+          sessionID: String(f?.sessionID ?? f?.session ?? ""),
+          title: String(f?.title ?? "Вопросы"),
+          fields: Array.isArray(f?.fields)
+            ? f.fields
+                .map((fl: any) => ({
+                  key: String(fl?.key ?? ""),
+                  title: String(fl?.title ?? ""),
+                  description: String(fl?.description ?? ""),
+                  type: String(fl?.type ?? "string"),
+                  custom: !!fl?.custom,
+                  options: Array.isArray(fl?.options)
+                    ? fl.options.map((o: any) => ({
+                        value: String(o?.value ?? o?.label ?? ""),
+                        label: String(o?.label ?? o?.value ?? ""),
+                        description: typeof o?.description === "string" ? o.description : undefined,
+                      }))
+                    : [],
+                }))
+                .filter((fl: any) => fl.key)
+            : [],
+        }))
+        .filter((f: QuestionForm) => f.id && f.fields.length > 0);
+    } catch {
+      return [];
+    }
+  }
+
+  /** ответить на форму-вопрос: answer — {q0: ["label"], q1: ["текст", ...]} */
+  async replyForm(sessionID: string, formID: string, answer: Record<string, string[]>): Promise<void> {
+    await this.req(`/api/session/${sessionID}/form/${formID}/reply`, {
+      method: "POST",
+      json: { answer },
+    });
+  }
+
+  /** пропустить форму-вопрос (агент получит «Unanswered»/отмену и продолжит) */
+  async skipForm(sessionID: string, formID: string, message?: string): Promise<void> {
+    const q = message ? `?message=${encodeURIComponent(message)}` : "";
+    await this.req(`/api/session/${sessionID}/form/${formID}${q}`, { method: "DELETE" });
   }
 }
 
