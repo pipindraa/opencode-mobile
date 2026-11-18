@@ -1,29 +1,30 @@
 {
-    "expo":  {
-                 "name":  "opencode-mobile",
-                 "slug":  "opencode-mobile",
-                 "version":  "1.7.8",
-                 "orientation":  "portrait",
-                 "icon":  "./assets/icon.png",
-                 "userInterfaceStyle":  "light",
-                 "plugins":  [
-                                 "./plugins/withCleartext.js"
-                             ],
-                 "ios":  {
-                             "supportsTablet":  true
-                         },
-                 "android":  {
-                                 "package":  "com.kiril.opencode",
-                                 "adaptiveIcon":  {
-                                                      "backgroundColor":  "#E6F4FE",
-                                                      "foregroundImage":  "./assets/android-icon-foreground.png",
-                                                      "backgroundImage":  "./assets/android-icon-background.png",
-                                                      "monochromeImage":  "./assets/android-icon-monochrome.png"
-                                                  },
-                                 "predictiveBackGestureEnabled":  false
-                             },
-                 "web":  {
-                             "favicon":  "./assets/favicon.png"
-                         }
-             }
+  "expo": {
+    "name": "opencode-mobile",
+    "slug": "opencode-mobile",
+    "version": "1.7.9",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "plugins": [
+      "./plugins/withCleartext.js"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.kiril.opencode",
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "versionCode": 10709
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
 }

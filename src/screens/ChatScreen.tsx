@@ -166,6 +166,12 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
   /** избранное моделей: ПОРЯДОК массива = порядок секции (перетаскивание ручкой) */
   const [favs, setFavs] = useState<string[]>([]);
   const hasFav = (k: string) => favs.includes(k);
+  // — перетаскивание избранного в шторке моделей —
+  // — перетаскивание избранного в шторке моделей —
+  const modelListRef = useRef<any>(null);
+  const modelWrapRef = useRef<any>(null);
+  const modelScrollInfo = useRef({ y: 0, height: 0, top: 0 });
+  const [draggingModel, setDraggingModel] = useState(false);
   /** название чата из сессии — в заголовке вместо имени пользователя */
   const [sessionTitle, setSessionTitle] = useState("");
   /** когда агент начал текущий запрос (мс) — для таймера «работает 12с» */
@@ -441,10 +447,17 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
           {handleProps && (
             <View
               {...handleProps}
-              style={{ paddingRight: spacing.xs, justifyContent: "center" }}
+              style={{
+                width: 44,
+                alignSelf: "stretch",
+                marginLeft: -spacing.s,
+                marginRight: spacing.xs,
+                alignItems: "center",
+                justifyContent: "center",
+              }}
               accessibilityLabel="Перетащить"
             >
-              <Ionicons name="reorder-three" size={20} color={colors.textDim} />
+              <Ionicons name="reorder-three" size={22} color={colors.textDim} />
             </View>
           )}
           <Pressable style={{ flex: 1 }} onPress={() => pressModelRow(m)}>
@@ -1785,38 +1798,56 @@ export default function ChatScreen({ api, serverKind = "opencode", sessionID, di
                   placeholderTextColor={colors.textDim}
                   autoCapitalize="none"
                 />
-                <ScrollView style={{ maxHeight: 520 }} contentContainerStyle={{ paddingBottom: spacing.s }}>
-                  {/* избранное — сверху, ручка ⋮ перетаскивает (порядок = порядок favs) */}
-                  {favModels.length > 0 && (
-                    <>
-                      <View style={s.secHdrRow}>
-                        <Ionicons name="star" size={12} color="#f5b73e" />
-                        <Text style={s.secHdr}>Избранное</Text>
+                <View ref={modelWrapRef} style={{ maxHeight: 520 }}>
+                <FlatList
+                  ref={modelListRef}
+                  data={modelRows}
+                  keyExtractor={(item, i) => String(i)}
+                  scrollEnabled={!draggingModel}
+                  onScroll={(e) => {
+                    modelScrollInfo.current.y = e.nativeEvent.contentOffset.y;
+                    modelScrollInfo.current.height = e.nativeEvent.layoutMeasurement.height;
+                  }}
+                  scrollEventThrottle={16}
+                  ItemSeparatorComponent={() => <View style={{ height: spacing.xs }} />}
+                  ListHeaderComponent={
+                    favModels.length > 0 ? (
+                      <View>
+                        <View style={s.secHdrRow}>
+                          <Ionicons name="star" size={12} color="#f5b73e" />
+                          <Text style={s.secHdr}>Избранное</Text>
+                        </View>
+                        <ReorderList
+                          items={favModels}
+                          keyOf={modelKey}
+                          onReorder={(ms) => onFavsReorder(ms.map(modelKey))}
+                          gap={spacing.xs}
+                          getScrollInfo={() => modelScrollInfo.current}
+                          onDragChange={(d) => {
+                            if (d) {
+                              modelWrapRef.current?.measureInWindow((_x: number, y: number, _w: number, h: number) => {
+                                modelScrollInfo.current.top = y;
+                                if (h > 0) modelScrollInfo.current.height = h;
+                              });
+                            }
+                            setDraggingModel(d);
+                          }}
+                          scrollTo={(y) => modelListRef.current?.scrollToOffset({ offset: y, animated: false })}
+                          renderItem={(m, ctx) => renderModelCard(m, ctx.handleProps)}
+                        />
                       </View>
-                      <ReorderList
-                        items={favModels}
-                        keyOf={modelKey}
-                        onReorder={(ms) => onFavsReorder(ms.map(modelKey))}
-                        gap={spacing.xs}
-                        renderItem={(m, ctx) => renderModelCard(m, ctx.handleProps)}
-                      />
-                    </>
-                  )}
-                  <FlatList
-                    data={modelRows}
-                    keyExtractor={(item, i) => String(i)}
-                    style={{ flexGrow: 0 }}
-                    ItemSeparatorComponent={() => <View style={{ height: spacing.xs }} />}
-                    renderItem={({ item }) =>
-                      item.kind === "hdr" ? <Text style={s.secHdr}>{item.label}</Text> : renderModelCard(item.m)
-                    }
-                    ListEmptyComponent={
-                      favModels.length === 0 && modelRows.length === 0 ? (
-                        <Text style={s.empty}>Ничего не нашлось</Text>
-                      ) : undefined
-                    }
-                  />
-                </ScrollView>
+                    ) : undefined
+                  }
+                  renderItem={({ item }) =>
+                    item.kind === "hdr" ? <Text style={s.secHdr}>{item.label}</Text> : renderModelCard(item.m)
+                  }
+                  ListEmptyComponent={
+                    favModels.length === 0 && modelRows.length === 0 ? (
+                      <Text style={s.empty}>Ничего не нашлось</Text>
+                    ) : undefined
+                  }
+                />
+                </View>
                 <Text style={s.hint}>
                   Звезда — добавить модель в избранное; ручка ⋮ в избранном — перетащить, чтобы поменять порядок; стрелка — раскрыть режимы reasoning.
                 </Text>
